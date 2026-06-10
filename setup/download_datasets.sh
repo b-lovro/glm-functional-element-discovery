@@ -37,4 +37,11 @@ echo "RiNALMo weights"
 download "$RINALMO_MICRO_URL" "$WEIGHTS_DIR/rinalmo_micro_pretrained.pt"
 download "$RINALMO_MEGA_URL" "$WEIGHTS_DIR/rinalmo_mega_pretrained.pt"
 
+echo "EVO2 weights"
+export HF_HOME="${ROOT_DIR}/models/evo2"
+export HF_HUB_CACHE="${ROOT_DIR}/models/evo2"
+
+echo "Downloading EVO2 7B model via Hugging Face CLI..."
+huggingface-cli download arcinstitute/evo2_7b
+
 echo "Done."
