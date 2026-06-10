@@ -2,39 +2,39 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RAW_DIR="${ROOT_DIR}/data/raw"
 
-RIBOSOME_DIR="${RAW_DIR}/ribosome"
-CRASS_DIR="${RAW_DIR}/crass_phages"
+RIBO_DIR="${ROOT_DIR}/data/raw/ribosome"
+CRASS_DIR="${ROOT_DIR}/data/raw/crass_phages"
+WEIGHTS_DIR="${ROOT_DIR}/models/rinalmo"
 
-RIBOSOME_URL="https://www.dropbox.com/scl/fi/18de0etvaqimgtattqwvl/MammalianRibosomalDNA.zip?rlkey=eja6nrap2nxq0jwj1rjsyr1cd&dl=1"
+RIBO_URL="https://www.dropbox.com/scl/fi/18de0etvaqimgtattqwvl/MammalianRibosomalDNA.zip?rlkey=eja6nrap2nxq0jwj1rjsyr1cd&dl=1"
 CRASS_URL="https://datashare.biochem.mpg.de/s/RQP37ow3RdkGddc/download"
+RINALMO_MICRO_URL="https://zenodo.org/records/15043668/files/rinalmo_micro_pretrained.pt"
+RINALMO_MEGA_URL="https://zenodo.org/records/15043668/files/rinalmo_mega_pretrained.pt"
 
-mkdir -p "${RIBOSOME_DIR}"
-mkdir -p "${CRASS_DIR}"
+download() {
+    local url="$1"
+    local out="$2"
 
-echo "Downloading ribosome dataset..."
-cd "${RIBOSOME_DIR}"
+    if [ -f "$out" ]; then
+        echo "Exists, skipping: $out"
+    else
+        wget -O "$out" "$url"
+    fi
+}
 
-if [ ! -f MammalianRibosomalDNA.zip ]; then
-    wget -O MammalianRibosomalDNA.zip "${RIBOSOME_URL}"
-else
-    echo "MammalianRibosomalDNA.zip already exists, skipping download."
-fi
+mkdir -p "$RIBO_DIR" "$CRASS_DIR" "$WEIGHTS_DIR"
 
-echo "Unzipping ribosome dataset..."
-unzip -n MammalianRibosomalDNA.zip
+echo "Ribosome dataset"
+download "$RIBO_URL" "$RIBO_DIR/MammalianRibosomalDNA.zip"
+unzip -n "$RIBO_DIR/MammalianRibosomalDNA.zip" -d "$RIBO_DIR"
 
-echo "Downloading crAss-like phage dataset..."
-cd "${CRASS_DIR}"
+echo "crAss-like phage dataset"
+download "$CRASS_URL" "$CRASS_DIR/crass_dataset.zip"
+unzip -n "$CRASS_DIR/crass_dataset.zip" -d "$CRASS_DIR"
 
-if [ ! -f crass_dataset.zip ]; then
-    wget -O crass_dataset.zip "${CRASS_URL}"
-else
-    echo "crass_dataset.zip already exists, skipping download."
-fi
-
-echo "Unzipping crAss-like phage dataset..."
-unzip -n crass_dataset.zip
+echo "RiNALMo weights"
+download "$RINALMO_MICRO_URL" "$WEIGHTS_DIR/rinalmo_micro_pretrained.pt"
+download "$RINALMO_MEGA_URL" "$WEIGHTS_DIR/rinalmo_mega_pretrained.pt"
 
 echo "Done."
