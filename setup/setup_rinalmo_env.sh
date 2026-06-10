@@ -20,23 +20,19 @@ CONDA_CHANNEL_PRIORITY=flexible conda env create \
   --prefix="$ENV_PREFIX" \
   -f environment_no_flash.yml
 
-eval "$(conda shell.bash hook)"
-conda activate "$ENV_NAME"
+conda install --prefix "$ENV_PREFIX" -c nvidia \
+  cuda-nvcc=11.8 cuda-cudart-dev=11.8 -y
 
-conda install -c nvidia cuda-nvcc=11.8 cuda-cudart-dev=11.8 -y
-
-export CUDA_HOME="$CONDA_PREFIX"
-export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
-
-which nvcc
-nvcc --version
-
-pip install flash-attn==2.3.2 --no-build-isolation
+"$ENV_PREFIX/bin/python" -m pip install flash-attn==2.3.2 --no-build-isolation
 
 cd "$PROJECT_DIR"
-pip install -e external/RiNALMo
+"$ENV_PREFIX/bin/python" -m pip install -e external/RiNALMo
 
-python -c "import torch, flash_attn; from rinalmo.pretrained import get_pretrained_model; get_pretrained_model(model_name='micro-v1'); print('RiNALMo OK')"
+"$ENV_PREFIX/bin/python" - <<'PY'
+import torch, flash_attn
+from rinalmo.pretrained import get_pretrained_model
+get_pretrained_model(model_name="giga-v1")
+print("RiNALMo OK")
+PY
 
-echo "DONE: $ENV_NAME"
+echo "DONE: $ENV_PREFIX"
