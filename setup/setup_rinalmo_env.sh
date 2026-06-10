@@ -1,10 +1,20 @@
-```bash
-#!/usr/bin/env bash
 set -euo pipefail
 
+
 ENV_NAME="group6-rinalmo"
-PROJECT_DIR="$HOME/Documents/Faks/semester_2/ML4RG/Project/glm-functional-element-discovery"
+PROJECT_DIR="/data/ceph/hdd/project/node_07/ml4rg_students/2026/project06/glm-functional-element-discovery"
 RINALMO_DIR="$PROJECT_DIR/external/RiNALMo"
+
+mkdir -p external
+cd external
+
+if [ ! -d "${RINALMO_DIR}" ]; then
+  git clone git@github.com:lbcb-sci/RiNALMo.git
+  cd ..
+fi
+
+
+
 
 echo "Project dir:  $PROJECT_DIR"
 echo "RiNALMo dir:  $RINALMO_DIR"
@@ -16,25 +26,11 @@ echo
 echo "Creating environment_no_flash.yml..."
 cp environment.yml environment_no_flash.yml
 
-python - <<'PY'
-from pathlib import Path
-
-path = Path("environment_no_flash.yml")
-lines = path.read_text().splitlines()
-
-new_lines = []
-for line in lines:
-    if "flash-attn" in line:
-        print("Removing:", line)
-        continue
-    new_lines.append(line)
-
-path.write_text("\n".join(new_lines) + "\n")
-PY
+grep -v "flash-attn" environment_no_flash.yml > tmp.yml && mv tmp.yml environment_no_flash.yml
 
 echo
 echo "Creating conda environment: $ENV_NAME"
-conda env create --name "$ENV_NAME" -f environment_no_flash.yml
+CONDA_CHANNEL_PRIORITY=flexible conda env create --prefix=/opt/modules/i12g/anaconda/envs/group6 python=3.10 -f environment_no_flash.yml
 
 echo
 echo "Activating conda environment..."
@@ -91,4 +87,4 @@ PY
 
 echo
 echo "DONE. Environment installed: $ENV_NAME"
-```
+
