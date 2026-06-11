@@ -42,6 +42,6 @@ export HF_HOME="${ROOT_DIR}/models/evo2"
 export HF_HUB_CACHE="${ROOT_DIR}/models/evo2"
 
 echo "Downloading EVO2 7B model via Hugging Face CLI..."
-huggingface-cli download arcinstitute/evo2_7b
+hf download arcinstitute/evo2_7b
 
 echo "Done."
