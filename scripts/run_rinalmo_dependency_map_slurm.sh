@@ -9,8 +9,8 @@
 
 set -e
 
-# To run locally without SLURM: bash scripts/run_dependency_map_slurm.sh
-# To submit via SLURM: sbatch scripts/run_dependency_map_slurm.sh
+# To run locally without SLURM: bash scripts/run_rinalmo_dependency_map_slurm.sh
+# To submit via SLURM: sbatch scripts/run_rinalmo_dependency_map_slurm.sh
 # Progress bar in: outputs/logs/rinalmo_dependency_map_%j.err
 
 # Change these parameters as needed
