@@ -23,20 +23,11 @@ BATCH_SIZE=16
 SUBSET_START=30100
 SUBSET_END=30200
 TEST_NAME="test"
+MAX_WINDOW_SIZE=1000
 
 # To run on crass_phages dataset:
 # INPUT_FILE="data/raw/crass_phages/Files for crAss-like phage genomic feature analysis/GPD_sequences.fa"
 # OUTPUT_DIR="outputs/crass_phages/dependency_maps"
-
-echo "Starting background GPU monitoring..."
-# This loops in the background every 30 seconds and logs GPU stats to a CSV file
-GPU_LOG="outputs/logs/rinalmo_dependency_map_${SLURM_JOB_ID}_gpu_util.csv"
-nvidia-smi --query-gpu=timestamp,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv > "$GPU_LOG"
-while true; do 
-    nvidia-smi --query-gpu=timestamp,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader >> "$GPU_LOG"
-    sleep 30
-done &
-GPU_MONITOR_PID=$!
 
 echo "Running dependency map script..."
 python scripts/rinalmo_dependency_map.py \
@@ -47,10 +38,7 @@ python scripts/rinalmo_dependency_map.py \
     --batch_size "$BATCH_SIZE" \
     --test_name "$TEST_NAME" \
     --subset_start "$SUBSET_START" \
-    --subset_end "$SUBSET_END"
-
-# Stop the GPU monitor once the python script finishes
-echo "Stopping GPU monitor..."
-kill $GPU_MONITOR_PID
+    --subset_end "$SUBSET_END" \
+    --max_window_size "$MAX_WINDOW_SIZE"
 
 echo "Done!"

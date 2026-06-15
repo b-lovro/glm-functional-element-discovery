@@ -41,6 +41,7 @@ def main():
     parser.add_argument("--subset_end", type=int, default=None, help="Subset end index for dependency map")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for inference")
     parser.add_argument("--test_name", type=str, default="test", help="Name of the test to append to the output filename")
+    parser.add_argument("--max_window_size", type=int, default=None, help="Maximum window size around the subset to process")
     args = parser.parse_args()
 
     input_path = Path(args.input_file)
@@ -125,10 +126,32 @@ def main():
         if args.subset_start is not None and args.subset_end is not None:
             subset = (args.subset_start, args.subset_end)
         
-        options = DependencyMapOptions(subset=subset, with_reconstruction=True)
+        active_seq = seq_clean
+        active_subset = subset
+        
+        if subset is not None and args.max_window_size is not None:
+            target_len = subset[1] - subset[0]
+            w_size = max(args.max_window_size, target_len)
+            pad_total = w_size - target_len
+            pad_left = pad_total // 2
+            
+            window_start = max(0, subset[0] - pad_left)
+            window_end = min(len(seq_clean), window_start + w_size)
+            
+            # Adjust if window_end hit the limit and we can shift left
+            actual_w_size = window_end - window_start
+            if actual_w_size < w_size and window_start > 0:
+                window_start = max(0, window_end - w_size)
+                
+            active_seq = seq_clean[window_start:window_end]
+            active_subset = (subset[0] - window_start, subset[1] - window_start)
+            
+            print(f"Applying max_window_size: slicing sequence to {window_start}:{window_end} (length {len(active_seq)})")
+        
+        options = DependencyMapOptions(subset=active_subset, with_reconstruction=True)
         try:
             dep_map = DependencyMap.compute_batched(
-                seq_clean,
+                active_seq,
                 tokenize_func,
                 forward_func,
                 batch_size=args.batch_size,
