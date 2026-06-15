@@ -18,8 +18,9 @@ def read_fasta(file_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Compute RiNALMo reconstruction accuracy on annotated elements")
-    parser.add_argument("--input_dir", type=str, required=True, help="Path to input directory containing CSV and FASTA files")
-    parser.add_argument("--output_file", type=str, required=True, help="Path to output summary CSV file")
+    parser.add_argument("--input_fasta", type=str, required=True, help="Path to input FASTA file")
+    parser.add_argument("--output_dir", type=str, required=True, help="Path to output directory for saving results")
+    parser.add_argument("--test_name", type=str, default="test", help="Test name to append to the output filename")
     parser.add_argument("--model_name", type=str, default="mega", help="RiNALMo model config name (e.g. giga, mega, micro)")
     parser.add_argument("--weights_path", type=str, default=None, help="Path to model weights")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for inference")
@@ -27,9 +28,10 @@ def main():
     parser.add_argument("--stride", type=int, default=100, help="Sliding window stride (number of bases to mask per window)")
     args = parser.parse_args()
 
-    input_dir = Path(args.input_dir)
-    output_file = Path(args.output_file)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
+    input_fasta = Path(args.input_fasta)
+    input_csv = Path(str(input_fasta).replace(".fasta", "_cleaned_matches.csv"))
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Model
     weights_path = args.weights_path
@@ -87,15 +89,12 @@ def main():
         return logits[:, 1:-1, sequence_tokens].cpu().numpy()
 
     # 2. Process Files
-    csv_files = list(input_dir.glob("*_cleaned_matches.csv"))
-    print(f"Found {len(csv_files)} annotation CSV files.")
-
     all_results = []
-    
     char_to_idx = {c: i for i, c in enumerate("ACGT")}
 
+    csv_files = [input_csv]
     for csv_path in csv_files:
-        fasta_path = str(csv_path).replace("_cleaned_matches.csv", ".fasta")
+        fasta_path = str(input_fasta)
         if not Path(fasta_path).exists():
             print(f"Warning: FASTA not found for {csv_path.name}, skipping.")
             continue
@@ -199,6 +198,8 @@ def main():
     # 5. Summarize Results
     if all_results:
         results_df = pd.DataFrame(all_results)
+        species_name = input_csv.name.replace("_cleaned_matches.csv", "")
+        output_file = output_dir / f"{species_name}_{args.test_name}_reconstruction_accuracy.csv"
         results_df.to_csv(output_file, index=False)
         print(f"\nSaved raw results to {output_file}")
         

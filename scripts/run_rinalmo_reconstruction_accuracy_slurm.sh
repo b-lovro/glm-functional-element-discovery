@@ -14,12 +14,13 @@ set -e
 # Progress bar in: outputs/logs/rinalmo_recon_acc_%j.err
 
 # Change these parameters as needed
-INPUT_DIR="data/raw/ribosome"
-OUTPUT_FILE="outputs/ribosome/ribosome_accuracy.csv"
+INPUT_FASTA="data/raw/ribosome/Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3.fasta"
+OUTPUT_DIR="outputs/ribosome/reconstruction_accuracy"
+TEST_NAME="test"
 MODEL_NAME="mega" 
 BATCH_SIZE=16
 CONTEXT_WINDOW=1000
-STRIDE=100
+STRIDE=250
 
 echo "Starting background GPU monitoring..."
 GPU_LOG="outputs/logs/gpu_util_${SLURM_JOB_ID:-local}.csv"
@@ -32,8 +33,9 @@ GPU_MONITOR_PID=$!
 
 echo "Running reconstruction accuracy script..."
 python scripts/rinalmo_reconstruction_accuracy.py \
-    --input_dir "$INPUT_DIR" \
-    --output_file "$OUTPUT_FILE" \
+    --input_fasta "$INPUT_FASTA" \
+    --output_dir "$OUTPUT_DIR" \
+    --test_name "$TEST_NAME" \
     --model_name "$MODEL_NAME" \
     --batch_size "$BATCH_SIZE" \
     --context_window "$CONTEXT_WINDOW" \
