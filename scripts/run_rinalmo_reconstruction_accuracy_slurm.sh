@@ -18,7 +18,7 @@ INPUT_FASTA="data/raw/ribosome/Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044
 OUTPUT_DIR="outputs/ribosome/reconstruction_accuracy"
 TEST_NAME="test"
 MODEL_NAME="mega" 
-BATCH_SIZE=16
+BATCH_SIZE=32
 CONTEXT_WINDOW=1000
 STRIDE=250
 

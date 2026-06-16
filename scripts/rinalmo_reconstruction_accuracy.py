@@ -200,23 +200,39 @@ def main():
         results_df = pd.DataFrame(all_results)
         species_name = input_csv.name.replace("_cleaned_matches.csv", "")
         output_file = output_dir / f"{species_name}_{args.test_name}_reconstruction_accuracy.csv"
+        
+        # Calculate summary statistics
+        total_len = results_df['Length'].sum()
+        global_weighted = (results_df['Length'] * results_df['Accuracy']).sum() / total_len
+        global_mean = results_df['Accuracy'].mean()
+        global_median = results_df['Accuracy'].median()
+
+        # Append summary rows
+        summary_rows = [
+            {"Species": "SUMMARY", "Label": "Overall Mean", "Type": "ALL", "Length": "", "Accuracy": global_mean, "Avg Confidence": ""},
+            {"Species": "SUMMARY", "Label": "Overall Median", "Type": "ALL", "Length": "", "Accuracy": global_median, "Avg Confidence": ""},
+            {"Species": "SUMMARY", "Label": "Overall Weighted Mean", "Type": "ALL", "Length": total_len, "Accuracy": global_weighted, "Avg Confidence": ""}
+        ]
+        results_df = pd.concat([results_df, pd.DataFrame(summary_rows)], ignore_index=True)
+        
+        # Save to CSV
         results_df.to_csv(output_file, index=False)
-        print(f"\nSaved raw results to {output_file}")
+        print(f"\nSaved results to {output_file}")
         
         print("\n=== Global Averages by Type ===")
-        # Weighted average by length
         def weighted_avg(group):
-            d = group['Length']
-            w = group['Accuracy']
+            # Ignore summary rows when grouping
+            group = group[group['Species'] != 'SUMMARY']
+            if len(group) == 0: return np.nan
+            d = pd.to_numeric(group['Length'])
+            w = pd.to_numeric(group['Accuracy'])
             return (d * w).sum() / d.sum()
             
-        summary = results_df.groupby("Type").apply(weighted_avg).reset_index(name="Weighted Accuracy")
+        summary = results_df[results_df['Species'] != 'SUMMARY'].groupby("Type").apply(weighted_avg).reset_index(name="Weighted Accuracy")
         summary['Weighted Accuracy'] = (summary['Weighted Accuracy'] * 100).round(2).astype(str) + "%"
         print(summary.to_string(index=False))
         
-        total_len = results_df['Length'].sum()
-        global_acc = (results_df['Length'] * results_df['Accuracy']).sum() / total_len
-        print(f"\nTotal Global Weighted Accuracy: {global_acc * 100:.2f}%\n")
+        print(f"\nTotal Global Weighted Accuracy: {global_weighted * 100:.2f}%\n")
     else:
         print("No valid elements found to evaluate.")
 
