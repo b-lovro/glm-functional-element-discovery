@@ -148,15 +148,15 @@ def main():
         # Use errorbar='sd' to show standard deviation (variance) across the elements
         sns.barplot(data=plot_df, x='Type', y='Score', hue='Metric', errorbar='sd', capsize=0.1, palette='muted')
         
-        plt.title('Reconstruction Accuracy vs Baseline by Feature Type')
+        plt.title('Reconstruction Accuracy vs Baseline by Feature Type\n(Length-Weighted Global Averages)')
         plt.ylabel('Accuracy (%)')
         plt.xlabel('Feature Type')
         plt.xticks(rotation=45, ha='right')
         plt.legend(title='')
         plt.tight_layout()
         
-        plot_path = input_dir / "accuracy_vs_baseline_plot.pdf"
-        plt.savefig(plot_path)
+        plot_path = input_dir / "accuracy_vs_baseline_plot.svg"
+        plt.savefig(plot_path, format='svg')
         plt.close()
         print(f"Saved plot to {plot_path}")
     except ImportError:
