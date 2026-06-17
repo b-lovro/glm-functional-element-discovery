@@ -18,7 +18,7 @@ def read_fasta(file_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Compute RiNALMo reconstruction accuracy on annotated elements")
-    parser.add_argument("--input_fasta", type=str, required=True, help="Path to input FASTA file")
+    parser.add_argument("--input_dir", type=str, required=True, help="Path to input directory containing FASTA and CSV files")
     parser.add_argument("--output_dir", type=str, required=True, help="Path to output directory for saving results")
     parser.add_argument("--test_name", type=str, default="test", help="Test name to append to the output filename")
     parser.add_argument("--model_name", type=str, default="mega", help="RiNALMo model config name (e.g. giga, mega, micro)")
@@ -28,8 +28,7 @@ def main():
     parser.add_argument("--stride", type=int, default=100, help="Sliding window stride (number of bases to mask per window)")
     args = parser.parse_args()
 
-    input_fasta = Path(args.input_fasta)
-    input_csv = Path(str(input_fasta).replace(".fasta", "_cleaned_matches.csv"))
+    input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,9 +91,11 @@ def main():
     all_results = []
     char_to_idx = {c: i for i, c in enumerate("ACGT")}
 
-    csv_files = [input_csv]
+    csv_files = list(input_dir.glob("*_cleaned_matches.csv"))
+    print(f"Found {len(csv_files)} annotation CSV files in {input_dir}.")
+
     for csv_path in csv_files:
-        fasta_path = str(input_fasta)
+        fasta_path = str(csv_path).replace("_cleaned_matches.csv", ".fasta")
         if not Path(fasta_path).exists():
             print(f"Warning: FASTA not found for {csv_path.name}, skipping.")
             continue
@@ -185,6 +186,12 @@ def main():
             
             correct_base_probs = recon_valid[np.arange(len(true_valid)), true_valid]
             avg_confidence = np.mean(correct_base_probs)
+            cross_entropy = -np.mean(np.log(correct_base_probs + 1e-12))
+            
+            # Baseline calculation
+            freqs = np.bincount(true_valid, minlength=4) / len(true_valid)
+            baseline_acc = np.sum(freqs ** 2)
+            baseline_ce = -np.sum(freqs * np.log(freqs + 1e-12))
             
             all_results.append({
                 "Species": species_name,
@@ -192,26 +199,51 @@ def main():
                 "Type": el_type,
                 "Length": len(true_valid),
                 "Accuracy": accuracy,
-                "Avg Confidence": avg_confidence
+                "Baseline Accuracy": baseline_acc,
+                "Avg Confidence": avg_confidence,
+                "Cross-Entropy": cross_entropy,
+                "Baseline CE": baseline_ce
             })
+            
+        # Save individual file results
+        species_results = [r for r in all_results if r["Species"] == species_name]
+        if species_results:
+            species_df = pd.DataFrame(species_results)
+            species_output_file = output_dir / f"{species_name}_{args.test_name}_reconstruction_accuracy.csv"
+            species_df.to_csv(species_output_file, index=False)
+            print(f"Saved {species_name} results to {species_output_file}")
 
     # 5. Summarize Results
     if all_results:
         results_df = pd.DataFrame(all_results)
-        species_name = input_csv.name.replace("_cleaned_matches.csv", "")
-        output_file = output_dir / f"{species_name}_{args.test_name}_reconstruction_accuracy.csv"
+        output_file = output_dir / f"all_species_{args.test_name}_reconstruction_accuracy.csv"
         
         # Calculate summary statistics
         total_len = results_df['Length'].sum()
         global_weighted = (results_df['Length'] * results_df['Accuracy']).sum() / total_len
+        global_weighted_base_acc = (results_df['Length'] * results_df['Baseline Accuracy']).sum() / total_len
+        global_weighted_ce = (results_df['Length'] * results_df['Cross-Entropy']).sum() / total_len
+        global_weighted_base_ce = (results_df['Length'] * results_df['Baseline CE']).sum() / total_len
+        global_weighted_conf = (results_df['Length'] * results_df['Avg Confidence']).sum() / total_len
+        
         global_mean = results_df['Accuracy'].mean()
         global_median = results_df['Accuracy'].median()
+        global_ce_mean = results_df['Cross-Entropy'].mean()
+        
+        global_base_acc_mean = results_df['Baseline Accuracy'].mean()
+        global_base_ce_mean = results_df['Baseline CE'].mean()
 
         # Append summary rows
         summary_rows = [
-            {"Species": "SUMMARY", "Label": "Overall Mean", "Type": "ALL", "Length": "", "Accuracy": global_mean, "Avg Confidence": ""},
-            {"Species": "SUMMARY", "Label": "Overall Median", "Type": "ALL", "Length": "", "Accuracy": global_median, "Avg Confidence": ""},
-            {"Species": "SUMMARY", "Label": "Overall Weighted Mean", "Type": "ALL", "Length": total_len, "Accuracy": global_weighted, "Avg Confidence": ""}
+            {"Species": "SUMMARY", "Label": "Overall Mean", "Type": "ALL", "Length": "", 
+             "Accuracy": global_mean, "Baseline Accuracy": global_base_acc_mean,
+             "Avg Confidence": "", "Cross-Entropy": global_ce_mean, "Baseline CE": global_base_ce_mean},
+            {"Species": "SUMMARY", "Label": "Overall Median", "Type": "ALL", "Length": "", 
+             "Accuracy": global_median, "Baseline Accuracy": results_df['Baseline Accuracy'].median(),
+             "Avg Confidence": "", "Cross-Entropy": results_df['Cross-Entropy'].median(), "Baseline CE": results_df['Baseline CE'].median()},
+            {"Species": "SUMMARY", "Label": "Overall Weighted Mean", "Type": "ALL", "Length": total_len, 
+             "Accuracy": global_weighted, "Baseline Accuracy": global_weighted_base_acc,
+             "Avg Confidence": global_weighted_conf, "Cross-Entropy": global_weighted_ce, "Baseline CE": global_weighted_base_ce}
         ]
         results_df = pd.concat([results_df, pd.DataFrame(summary_rows)], ignore_index=True)
         

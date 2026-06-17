@@ -14,7 +14,7 @@ set -e
 # Progress bar in: outputs/logs/rinalmo_recon_acc_%j.err
 
 # Change these parameters as needed
-INPUT_FASTA="data/raw/ribosome/Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3.fasta"
+INPUT_DIR="data/raw/ribosome"
 OUTPUT_DIR="outputs/ribosome/reconstruction_accuracy"
 TEST_NAME="test"
 MODEL_NAME="mega" 
@@ -33,7 +33,7 @@ GPU_MONITOR_PID=$!
 
 echo "Running reconstruction accuracy script..."
 python scripts/rinalmo_reconstruction_accuracy.py \
-    --input_fasta "$INPUT_FASTA" \
+    --input_dir "$INPUT_DIR" \
     --output_dir "$OUTPUT_DIR" \
     --test_name "$TEST_NAME" \
     --model_name "$MODEL_NAME" \
