@@ -5,8 +5,8 @@ import numpy as np
 
 def main():
     parser = argparse.ArgumentParser(description="Aggregate individual reconstruction accuracy CSVs into a global summary.")
-    parser.add_argument("--input_dir", type=str, required=True, help="Path to directory containing individual species CSV files.")
-    parser.add_argument("--output_file", type=str, default="global_metrics.csv", help="Filename for the aggregated summary output CSV.")
+    parser.add_argument("--input-dir", type=str, required=True, help="Path to directory containing individual species CSV files.")
+    parser.add_argument("--output-file", type=str, default="global_metrics_reconstruction_accuracy.csv", help="Filename for the aggregated summary output CSV.")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -122,6 +122,45 @@ def main():
     output_path = input_dir / args.output_file
     final_df.to_csv(output_path, index=False)
     print(f"\nSaved global metrics to {output_path}")
+
+    # Generate Plot
+    print("\nGenerating grouped bar plot with variance...")
+    try:
+        import seaborn as sns
+        import matplotlib.pyplot as plt
+
+        # Create a combined dataframe for plotting that includes an OVERALL category
+        plot_df = full_df.copy()
+        overall_df = plot_df.copy()
+        overall_df['Type'] = 'OVERALL'
+        plot_df = pd.concat([plot_df, overall_df], ignore_index=True)
+        
+        # Melt the dataframe for seaborn grouped barplot
+        plot_df = plot_df.melt(id_vars=['Type'], 
+                               value_vars=['Accuracy', 'Baseline Accuracy'], 
+                               var_name='Metric', 
+                               value_name='Score')
+                               
+        # Convert to percentage
+        plot_df['Score'] *= 100
+        
+        plt.figure(figsize=(10, 6))
+        # Use errorbar='sd' to show standard deviation (variance) across the elements
+        sns.barplot(data=plot_df, x='Type', y='Score', hue='Metric', errorbar='sd', capsize=0.1, palette='muted')
+        
+        plt.title('Reconstruction Accuracy vs Baseline by Feature Type')
+        plt.ylabel('Accuracy (%)')
+        plt.xlabel('Feature Type')
+        plt.xticks(rotation=45, ha='right')
+        plt.legend(title='')
+        plt.tight_layout()
+        
+        plot_path = input_dir / "accuracy_vs_baseline_plot.pdf"
+        plt.savefig(plot_path)
+        plt.close()
+        print(f"Saved plot to {plot_path}")
+    except ImportError:
+        print("Warning: seaborn or matplotlib not installed. Plot not generated.")
 
 if __name__ == "__main__":
     main()
