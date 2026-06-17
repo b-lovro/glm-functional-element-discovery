@@ -213,60 +213,7 @@ def main():
             species_df.to_csv(species_output_file, index=False)
             print(f"Saved {species_name} results to {species_output_file}")
 
-    # 5. Summarize Results
-    if all_results:
-        results_df = pd.DataFrame(all_results)
-        output_file = output_dir / f"all_species_{args.test_name}_reconstruction_accuracy.csv"
-        
-        # Calculate summary statistics
-        total_len = results_df['Length'].sum()
-        global_weighted = (results_df['Length'] * results_df['Accuracy']).sum() / total_len
-        global_weighted_base_acc = (results_df['Length'] * results_df['Baseline Accuracy']).sum() / total_len
-        global_weighted_ce = (results_df['Length'] * results_df['Cross-Entropy']).sum() / total_len
-        global_weighted_base_ce = (results_df['Length'] * results_df['Baseline CE']).sum() / total_len
-        global_weighted_conf = (results_df['Length'] * results_df['Avg Confidence']).sum() / total_len
-        
-        global_mean = results_df['Accuracy'].mean()
-        global_median = results_df['Accuracy'].median()
-        global_ce_mean = results_df['Cross-Entropy'].mean()
-        
-        global_base_acc_mean = results_df['Baseline Accuracy'].mean()
-        global_base_ce_mean = results_df['Baseline CE'].mean()
-
-        # Append summary rows
-        summary_rows = [
-            {"Species": "SUMMARY", "Label": "Overall Mean", "Type": "ALL", "Length": "", 
-             "Accuracy": global_mean, "Baseline Accuracy": global_base_acc_mean,
-             "Avg Confidence": "", "Cross-Entropy": global_ce_mean, "Baseline CE": global_base_ce_mean},
-            {"Species": "SUMMARY", "Label": "Overall Median", "Type": "ALL", "Length": "", 
-             "Accuracy": global_median, "Baseline Accuracy": results_df['Baseline Accuracy'].median(),
-             "Avg Confidence": "", "Cross-Entropy": results_df['Cross-Entropy'].median(), "Baseline CE": results_df['Baseline CE'].median()},
-            {"Species": "SUMMARY", "Label": "Overall Weighted Mean", "Type": "ALL", "Length": total_len, 
-             "Accuracy": global_weighted, "Baseline Accuracy": global_weighted_base_acc,
-             "Avg Confidence": global_weighted_conf, "Cross-Entropy": global_weighted_ce, "Baseline CE": global_weighted_base_ce}
-        ]
-        results_df = pd.concat([results_df, pd.DataFrame(summary_rows)], ignore_index=True)
-        
-        # Save to CSV
-        results_df.to_csv(output_file, index=False)
-        print(f"\nSaved results to {output_file}")
-        
-        print("\n=== Global Averages by Type ===")
-        def weighted_avg(group):
-            # Ignore summary rows when grouping
-            group = group[group['Species'] != 'SUMMARY']
-            if len(group) == 0: return np.nan
-            d = pd.to_numeric(group['Length'])
-            w = pd.to_numeric(group['Accuracy'])
-            return (d * w).sum() / d.sum()
-            
-        summary = results_df[results_df['Species'] != 'SUMMARY'].groupby("Type").apply(weighted_avg).reset_index(name="Weighted Accuracy")
-        summary['Weighted Accuracy'] = (summary['Weighted Accuracy'] * 100).round(2).astype(str) + "%"
-        print(summary.to_string(index=False))
-        
-        print(f"\nTotal Global Weighted Accuracy: {global_weighted * 100:.2f}%\n")
-    else:
-        print("No valid elements found to evaluate.")
-
+    print(f"\nSuccessfully finished evaluating {len(csv_files)} files in {input_dir}.")
+    
 if __name__ == "__main__":
     main()
