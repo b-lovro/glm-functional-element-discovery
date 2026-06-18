@@ -135,6 +135,24 @@ def main():
         overall_df['Type'] = 'OVERALL'
         plot_df = pd.concat([plot_df, overall_df], ignore_index=True)
         
+        # Map types to include total length in the label
+        def format_len(l):
+            if pd.isna(l): return "?"
+            if l >= 1_000_000: return f"{l/1_000_000:.1f}M"
+            if l >= 1_000: return f"{l/1000:.1f}k"
+            return str(int(l))
+            
+        type_to_len = {}
+        for _, row in final_df.iterrows():
+            t = row['Type']
+            l_str = format_len(row['Total Length'])
+            if t == "OVERALL WEIGHTED MEAN":
+                type_to_len["OVERALL"] = l_str
+            elif not t.startswith("OVERALL"):
+                type_to_len[t] = l_str
+                
+        plot_df['Type'] = plot_df['Type'].apply(lambda t: f"{t}\n(L={type_to_len.get(t, '?')})")
+        
         # Melt the dataframe for seaborn grouped barplot
         plot_df = plot_df.melt(id_vars=['Type'], 
                                value_vars=['Accuracy', 'Baseline Accuracy'], 

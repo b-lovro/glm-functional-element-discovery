@@ -13,4 +13,4 @@ ENV="/opt/modules/i12g/anaconda/envs/group6-evo2-rebuild"
 
 cd "$PROJECT_DIR"
 
-"$ENV/bin/python" scripts/smoke_evo2.py
+"$ENV/bin/python" scripts/smoke_evo2_backward.py  --seq-len 128 --steps 2

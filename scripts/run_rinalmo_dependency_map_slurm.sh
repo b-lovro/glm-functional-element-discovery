@@ -18,11 +18,11 @@ INPUT_FILE="data/raw/ribosome/Mammalia-Artiodactyla-Addax nasomaculatus-GCA_0442
 OUTPUT_DIR="outputs/ribosome/dependency_maps"
 MAX_SEQUENCES=1
 MODEL_NAME="mega"
-BATCH_SIZE=16
+BATCH_SIZE=32
 #MODEL_PATH="models/rinalmo/rinalmo_micro_pretrained.pt"
-SUBSET_START=30100
-SUBSET_END=30200
-TEST_NAME="test"
+SUBSET_START=9800
+SUBSET_END=10000
+TEST_NAME="TTF1"
 MAX_WINDOW_SIZE=1000
 
 # To run on crass_phages dataset:

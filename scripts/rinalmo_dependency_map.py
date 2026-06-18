@@ -172,8 +172,8 @@ def main():
                 np.save(output_dir / f"{safe_seq_id}_{suffix}_reconstruction.npy", dep_map.reconstruction)
             
             fig = dep_map.plot()
-            output_file = output_dir / f"{safe_seq_id}_{suffix}_dependency_map.svg"
-            fig.write_image(str(output_file))
+            output_file = output_dir / f"{safe_seq_id}_{suffix}_dependency_map.png"
+            fig.write_image(str(output_file), scale=10)
             print(f"Saved {output_file}")
             
         except Exception as e:

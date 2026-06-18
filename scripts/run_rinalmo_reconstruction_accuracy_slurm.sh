@@ -16,10 +16,10 @@ set -e
 # Change these parameters as needed
 INPUT_DIR="data/raw/ribosome"
 OUTPUT_DIR="outputs/ribosome/reconstruction_accuracy"
-TEST_NAME="test"
+TEST_NAME="500-250"
 MODEL_NAME="mega" 
 BATCH_SIZE=32
-CONTEXT_WINDOW=1000
+CONTEXT_WINDOW=500
 STRIDE=250
 
 echo "Starting background GPU monitoring..."
