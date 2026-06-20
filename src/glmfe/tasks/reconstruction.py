@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from glmfe.models.base import BaseSequenceModel
+from glmfe.seq_models.base import BaseSequenceModel
 
 
 _BASES = np.array(list("ACGT"))

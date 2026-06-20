@@ -24,8 +24,8 @@ def main():
     sys.path.insert(0, str(repository_root / "src"))
 
     from glmfe.datasets.prepared import load_prepared_dataset
-    from glmfe.models.rinalmo import load_rinalmo_model
-    from glmfe.models.random import RandomSequenceModel
+    from glmfe.seq_models.rinalmo import load_rinalmo_model
+    from glmfe.seq_models.random import RandomSequenceModel
     from glmfe.tasks.reconstruction import run_reconstruction
 
     run_config_path = repository_root / sys.argv[1]
