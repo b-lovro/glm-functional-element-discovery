@@ -74,6 +74,10 @@ _PER_REGION_COLUMNS = [
     "mean_cross_entropy_bits",
     "median_cross_entropy_bits",
     "std_cross_entropy_bits",
+    "q05_cross_entropy_bits",
+    "q25_cross_entropy_bits",
+    "q75_cross_entropy_bits",
+    "q95_cross_entropy_bits",
     "accuracy",
 ]
 
@@ -223,6 +227,10 @@ def run_reconstruction(
             mean_cross_entropy_bits=("cross_entropy_bits", "mean"),
             median_cross_entropy_bits=("cross_entropy_bits", "median"),
             std_cross_entropy_bits=("cross_entropy_bits", "std"),
+            q05_cross_entropy_bits=("cross_entropy_bits", lambda x: x.quantile(0.05)),
+            q25_cross_entropy_bits=("cross_entropy_bits", lambda x: x.quantile(0.25)),
+            q75_cross_entropy_bits=("cross_entropy_bits", lambda x: x.quantile(0.75)),
+            q95_cross_entropy_bits=("cross_entropy_bits", lambda x: x.quantile(0.95)),
             accuracy=("correct", "mean"),
         )
         .reset_index()
