@@ -68,7 +68,16 @@ def prepare_dataset(input_dir, output_dir):
 
         for source_row, row in annotations.iterrows():
             start = int(row["start"])
-            end = int(row["end"]) + 1
+            raw_end = int(row["end"])
+            if raw_end == sequence_length and row["type"] == "18S_rRNA":
+                end = sequence_length
+            else:
+                end = raw_end + 1
+            if not 0 <= start < end <= sequence_length:
+                raise ValueError(
+                    f"Invalid coordinates in {annotation_path} row {source_row}: "
+                    f"[{start}, {end}) for sequence length {sequence_length}"
+                )
             regions.append(
                 {
                     "region_id": f"{species}:{source_row}",
