@@ -17,7 +17,7 @@ env/
 
 # Data
 data/raw/
-data/processed/
+data/prepared/
 *.zip
 *.tar
 *.tar.gz
