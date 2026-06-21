@@ -29,6 +29,14 @@ _MAP_INDEX_COLUMNS = [
     "region_id",
     "label",
     "feature_type",
+    "region_start",
+    "region_end",
+    "region_length",
+    "tile_index",
+    "tile_start",
+    "tile_end",
+    "tile_length",
+    "long_region_policy",
     "start",
     "end",
     "length",
@@ -75,20 +83,45 @@ def run_dependency_maps(
                     "region_id": None,
                     "label": None,
                     "feature_type": None,
+                    "region_start": None,
+                    "region_end": None,
+                    "region_length": None,
+                    "tile_index": None,
+                    "tile_start": None,
+                    "tile_end": None,
+                    "tile_length": None,
+                    "long_region_policy": None,
                     "start": start,
                     "end": end,
                 }
             )
-    elif mode=="region":
+    elif mode == "region":
         region_config = dependency_config["region"]
         label = region_config["label"]
         configured_record_ids = region_config["record_ids"]
+        long_region_policy = str(region_config["long_region_policy"])
+        if long_region_policy not in {"error", "tile"}:
+            raise ValueError(
+                "dependency_maps.region.long_region_policy must be "
+                "'error' or 'tile'"
+            )
+        if long_region_policy == "tile":
+            tile_length = int(region_config["tile_length"])
+            tile_stride = int(region_config["tile_stride"])
+            if tile_length > model.max_context_length:
+                raise ValueError(
+                    f"dependency_maps.region.tile_length {tile_length} "
+                    f"exceeds model context length "
+                    f"{model.max_context_length}"
+                )
         selected_regions = regions.loc[
             (regions["label"] == label)
             | (regions["feature_type"] == label)
         ]
         if configured_record_ids != "all":
-            selected_regions = selected_regions.loc[selected_regions["record_id"].isin(configured_record_ids)]
+            selected_regions = selected_regions.loc[
+                selected_regions["record_id"].isin(configured_record_ids)
+            ]
         if selected_regions.empty:
             raise ValueError(
                 f"No dependency-map regions matched label or feature type "
@@ -96,25 +129,69 @@ def run_dependency_maps(
                 f"and record_ids {configured_record_ids!r}"
             )
         for region in selected_regions.itertuples(index=False):
-            start = int(region.start)
-            end = int(region.end)
+            region_start = int(region.start)
+            region_end = int(region.end)
+            region_length = region_end - region_start
             record_id = str(region.record_id)
             region_id = str(region.region_id)
-            jobs.append(
-                {
-                    "map_id": (
-                        f"{record_id}__{region_id}__{start}_{end}"
-                    ),
-                    "record_id": record_id,
-                    "region_id": region_id,
-                    "label": region.label,
-                    "feature_type": region.feature_type,
-                    "start": start,
-                    "end": end,
-                }
-            )
+            if region_length <= model.max_context_length:
+                tile_intervals = [(region_start, region_end)]
+            elif long_region_policy == "error":
+                raise ValueError(
+                    f"Dependency-map region {region_id} for record "
+                    f"{record_id} [{region_start}, {region_end}) has length "
+                    f"{region_length}, which exceeds model context length "
+                    f"{model.max_context_length}; use long_region_policy: "
+                    "tile to split it into local dependency-map windows"
+                )
+            else:
+                tile_intervals = []
+                for tile_start in range(
+                    region_start,
+                    region_end - tile_length + 1,
+                    tile_stride,
+                ):
+                    tile_intervals.append(
+                        (tile_start, tile_start + tile_length)
+                    )
+                final_tile = (
+                    region_end - tile_length,
+                    region_end,
+                )
+                if tile_intervals[-1] != final_tile:
+                    tile_intervals.append(final_tile)
+
+            for tile_index, (tile_start, tile_end) in enumerate(
+                tile_intervals
+            ):
+                jobs.append(
+                    {
+                        "map_id": (
+                            f"{record_id}__{region_id}__"
+                            f"tile_{tile_index:03d}__"
+                            f"{tile_start}_{tile_end}"
+                        ),
+                        "record_id": record_id,
+                        "region_id": region_id,
+                        "label": region.label,
+                        "feature_type": region.feature_type,
+                        "region_start": region_start,
+                        "region_end": region_end,
+                        "region_length": region_length,
+                        "tile_index": tile_index,
+                        "tile_start": tile_start,
+                        "tile_end": tile_end,
+                        "tile_length": tile_end - tile_start,
+                        "long_region_policy": long_region_policy,
+                        "start": tile_start,
+                        "end": tile_end,
+                    }
+                )
     else:
-        raise ValueError(f"Unsupported dependency_maps mode: {mode}; expected manual or region")
+        raise ValueError(
+            f"Unsupported dependency_maps mode: {mode}; "
+            "expected manual or region"
+        )
 
     # Create output directories and package callbacks.
     dependency_dir = output_dir / "dependency_maps"
@@ -207,11 +284,20 @@ def run_dependency_maps(
                 "Dependency: %{z:.4f}<extra></extra>"
             ),
         )
-        figure.update_layout(
-            title=(
+        if mode == "region":
+            title = (
+                f"{map_id}<br>"
+                f"<sup>{record_id} region "
+                f"[{job['region_start']}, {job['region_end']}) | "
+                f"tile {job['tile_index']:03d} [{start}, {end})</sup>"
+            )
+        else:
+            title = (
                 f"{map_id}<br>"
                 f"<sup>{record_id} [{start}, {end})</sup>"
-            ),
+            )
+        figure.update_layout(
+            title=title,
             margin={"l": 80, "r": 80, "t": 180, "b": 80},
         )
         window_left = start / sequence_length
@@ -268,6 +354,14 @@ def run_dependency_maps(
                 "region_id": job["region_id"],
                 "label": job["label"],
                 "feature_type": job["feature_type"],
+                "region_start": job["region_start"],
+                "region_end": job["region_end"],
+                "region_length": job["region_length"],
+                "tile_index": job["tile_index"],
+                "tile_start": job["tile_start"],
+                "tile_end": job["tile_end"],
+                "tile_length": job["tile_length"],
+                "long_region_policy": job["long_region_policy"],
                 "start": start,
                 "end": end,
                 "length": end - start,

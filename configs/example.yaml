@@ -38,12 +38,18 @@ dependency_maps:
       - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
   region:
     # Matches an exact label or feature_type value.
-    label: TTF1
+    label: 18S_rRNA
     # record_ids: all
     # record_ids can instead be a non-empty explicit list:
     record_ids:
       - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
       - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
+    # error rejects regions longer than the model context. tile creates
+    # overlapping local maps, which cannot recover interactions between bases
+    # that never occur in the same tile.
+    long_region_policy: tile
+    tile_length: 512
+    tile_stride: 384
   
 
 outputs_root: outputs/runs
