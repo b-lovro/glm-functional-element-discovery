@@ -1,5 +1,5 @@
 run_id: example-run-v1
-overwrite: false 
+overwrite: true 
 
 run_tasks:
   - reconstruction
@@ -26,14 +26,24 @@ reconstruction:
   plot_results: true
 
 dependency_maps:
-  mode: manual
+  mode: region
   batch_size: 8
   dependency_by_masking: false
   with_reconstruction: true
-  windows:
-    - map_id: example-window-001
-      record_id: Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
-      start: 4000
-      end: 4100
+  manual:
+    start: 4000
+    end: 43
+    record_ids:
+      - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
+      - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
+  region:
+    # Matches an exact label or feature_type value.
+    label: TTF1
+    # record_ids: all
+    # record_ids can instead be a non-empty explicit list:
+    record_ids:
+      - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
+      - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
+  
 
 outputs_root: outputs/runs

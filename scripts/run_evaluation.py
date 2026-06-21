@@ -96,6 +96,7 @@ def main():
         elif task == "dependency_maps":
             map_index = run_dependency_maps(
                 records,
+                regions,
                 model,
                 run_config["dependency_maps"],
                 run_dir,

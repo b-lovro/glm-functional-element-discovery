@@ -1,11 +1,11 @@
-"""Compute dependency maps only for explicitly configured manual windows.
+"""Compute dependency maps for configured manual or annotation regions.
 
-A manual window is a half-open interval ``[start, end)`` within one prepared
-sequence record. This task validates and extracts each requested window, calls
-the external ``dependency_map`` package through the model-independent wrapper
-interface, and saves compressed ``.npz`` arrays plus visualizations. Map-index
-coordinates remain relative to the full source record so outputs are
-interpretable later.
+Each map uses a half-open interval ``[start, end)`` within one prepared sequence
+record. This task builds windows from explicit manual coordinates or matching
+prepared annotations, validates and extracts each sequence, calls the external
+``dependency_map`` package through the model-independent wrapper interface, and
+saves compressed ``.npz`` arrays plus visualizations. Map-index coordinates
+remain relative to the full source record so outputs are interpretable later.
 """
 
 from functools import partial
@@ -26,6 +26,9 @@ _MAP_INDEX_COLUMNS = [
     "model_id",
     "map_id",
     "record_id",
+    "region_id",
+    "label",
+    "feature_type",
     "start",
     "end",
     "length",
@@ -40,6 +43,7 @@ _MAP_INDEX_COLUMNS = [
 
 def run_dependency_maps(
     records: pd.DataFrame,
+    regions: pd.DataFrame,
     model: BaseSequenceModel,
     dependency_config: dict,
     output_dir: Path,
@@ -48,18 +52,69 @@ def run_dependency_maps(
     model_id: str,
     overwrite: bool,
 ) -> pd.DataFrame:
-    """Compute and save dependency maps for configured manual windows."""
+    """Compute and save configured manual or region dependency maps."""
 
-    # Validate dependency-map configuration.
-    mode = dependency_config["mode"]
-    if mode != "manual":
-        raise ValueError(f"Unsupported dependency_maps mode: {mode}")
-
-    batch_size = dependency_config["batch_size"]
-
+    mode = str(dependency_config["mode"])
+    batch_size = int(dependency_config["batch_size"])
     dependency_by_masking = bool(dependency_config["dependency_by_masking"])
     with_reconstruction = bool(dependency_config["with_reconstruction"])
-    windows = list(dependency_config["windows"])
+
+    # Build manual or region jobs from the configuration.
+    jobs = []
+    if mode == "manual":
+        manual_config = dependency_config["manual"]
+        start = int(manual_config["start"])
+        end = int(manual_config["end"])
+        record_ids = list(manual_config["record_ids"])
+        for configured_record_id in record_ids:
+            record_id = str(configured_record_id)
+            jobs.append(
+                {
+                    "map_id": f"{record_id}__{start}_{end}",
+                    "record_id": record_id,
+                    "region_id": None,
+                    "label": None,
+                    "feature_type": None,
+                    "start": start,
+                    "end": end,
+                }
+            )
+    elif mode=="region":
+        region_config = dependency_config["region"]
+        label = region_config["label"]
+        configured_record_ids = region_config["record_ids"]
+        selected_regions = regions.loc[
+            (regions["label"] == label)
+            | (regions["feature_type"] == label)
+        ]
+        if configured_record_ids != "all":
+            selected_regions = selected_regions.loc[selected_regions["record_id"].isin(configured_record_ids)]
+        if selected_regions.empty:
+            raise ValueError(
+                f"No dependency-map regions matched label or feature type "
+                f"{label!r} "
+                f"and record_ids {configured_record_ids!r}"
+            )
+        for region in selected_regions.itertuples(index=False):
+            start = int(region.start)
+            end = int(region.end)
+            record_id = str(region.record_id)
+            region_id = str(region.region_id)
+            jobs.append(
+                {
+                    "map_id": (
+                        f"{record_id}__{region_id}__{start}_{end}"
+                    ),
+                    "record_id": record_id,
+                    "region_id": region_id,
+                    "label": region.label,
+                    "feature_type": region.feature_type,
+                    "start": start,
+                    "end": end,
+                }
+            )
+    else:
+        raise ValueError(f"Unsupported dependency_maps mode: {mode}; expected manual or region")
 
     # Create output directories and package callbacks.
     dependency_dir = output_dir / "dependency_maps"
@@ -81,12 +136,16 @@ def run_dependency_maps(
     )
 
     rows = []
-    for window in windows:
-        # Validate and extract each configured sequence window.
-        map_id = str(window["map_id"])
-        record_id = str(window["record_id"])
-        start = int(window["start"])
-        end = int(window["end"])
+    # Process every job through shared validation, inference, and output logic.
+    for job in jobs:
+        map_id = job["map_id"]
+        record_id = job["record_id"]
+        start = job["start"]
+        end = job["end"]
+        relative_record_maps_dir = (
+            Path("dependency_maps") / "maps" / record_id
+        )
+        (output_dir / relative_record_maps_dir).mkdir(exist_ok=True)
 
         matching_records = records.loc[records["record_id"] == record_id]
         if len(matching_records) != 1:
@@ -120,7 +179,7 @@ def run_dependency_maps(
             options=options,
         )
 
-        relative_map_path = Path("dependency_maps") / "maps" / f"{map_id}.npz"
+        relative_map_path = relative_record_maps_dir / f"{map_id}.npz"
         map_path = output_dir / relative_map_path
         arrays = {
             "dependency_map": result.dependency_map,
@@ -132,10 +191,10 @@ def run_dependency_maps(
 
         # Create and save visualizations.
         relative_html_plot_path = (
-            Path("dependency_maps") / "maps" / f"{map_id}.html"
+            relative_record_maps_dir / f"{map_id}.html"
         )
         relative_pdf_plot_path = (
-            Path("dependency_maps") / "maps" / f"{map_id}.pdf"
+            relative_record_maps_dir / f"{map_id}.pdf"
         )
         if not hasattr(matplotlib_cm, "get_cmap"):
             matplotlib_cm.get_cmap = colormaps.get_cmap
@@ -206,6 +265,9 @@ def run_dependency_maps(
                 "model_id": model_id,
                 "map_id": map_id,
                 "record_id": record_id,
+                "region_id": job["region_id"],
+                "label": job["label"],
+                "feature_type": job["feature_type"],
                 "start": start,
                 "end": end,
                 "length": end - start,

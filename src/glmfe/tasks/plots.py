@@ -113,7 +113,7 @@ def plot_reconstruction_results(
 ) -> None:
     """Save per-region reconstruction summaries as PDF and PNG figures."""
 
-    output_dir.mkdir(exist_ok=False)
+    output_dir.mkdir(exist_ok=True)
     feature_order = per_region["feature_type"].value_counts().index.tolist()
     rng = np.random.default_rng(44)
 
