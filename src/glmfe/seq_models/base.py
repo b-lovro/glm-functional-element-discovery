@@ -16,3 +16,19 @@ class BaseSequenceModel(ABC):
         batch_size: int,
     ) -> np.ndarray:
         ...
+
+    @abstractmethod
+    def dependency_tokenize(
+        self,
+        sequence: str,
+        mask_position: int | None,
+    ) -> object:
+        ...
+
+    @abstractmethod
+    def dependency_forward(
+        self,
+        tokenized_sequences: list[object],
+        batch_size: int,
+    ) -> np.ndarray:
+        ...

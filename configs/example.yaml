@@ -1,17 +1,38 @@
-run_id: example-run-v1
+run_id: example-run-v3
+overwrite: true 
+
+run_tasks:
+  # - reconstruction
+  - dependency_maps
 
 dataset:
   dataset_id: ribosome
   prepared_dir: data/prepared/ribosome
 
 model:
-  adapter: rinalmo
-  size: micro
-  weights: models/rinalmo/rinalmo_micro_pretrained.pt
-  device: cuda:0
+  adapter: random
+
+  random:
+    seed: 42
+    max_context_length: 1022
+  rinalmo:
+    size: micro
+    weights: models/rinalmo/rinalmo_micro_pretrained.pt
+    device: cuda:0
 
 reconstruction:
   context_length: 512
   batch_size: 8
+
+dependency_maps:
+  mode: manual
+  batch_size: 8
+  dependency_by_masking: false
+  with_reconstruction: true
+  windows:
+    - map_id: example-window-001
+      record_id: Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
+      start: 4000
+      end: 4999
 
 outputs_root: outputs/runs
