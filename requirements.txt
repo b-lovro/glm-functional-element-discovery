@@ -1,9 +1,13 @@
 torch
 numpy
 pandas
+pyarrow
 scipy
 scikit-learn
 matplotlib
+plotly
+drawsvg
+data-url
 biopython
 tqdm
 transformers

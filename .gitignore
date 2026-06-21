@@ -38,6 +38,8 @@ external/
 # Outputs
 outputs/
 runs/
+!configs/runs/
+!configs/runs/*.yaml
 wandb/
 logs/
 

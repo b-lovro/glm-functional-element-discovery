@@ -1,0 +1,24 @@
+run_id: ribosome-random-dependency-map-smoke-v2
+
+run_tasks:
+  - dependency_maps
+
+dataset:
+  dataset_id: ribosome
+  prepared_dir: data/prepared/ribosome
+
+model:
+  adapter: random
+
+dependency_maps:
+  mode: manual
+  batch_size: 4
+  dependency_by_masking: false
+  with_reconstruction: true
+  windows:
+    - map_id: smoke-window-001
+      record_id: Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
+      start: 0
+      end: 8
+
+outputs_root: outputs/runs

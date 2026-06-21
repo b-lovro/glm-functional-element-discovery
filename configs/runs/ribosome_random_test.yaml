@@ -1,0 +1,17 @@
+run_id: ribosome-random-test-v5
+
+run_tasks:
+  - reconstruction
+
+dataset:
+  dataset_id: ribosome
+  prepared_dir: data/prepared/ribosome
+
+model:
+  adapter: random
+
+reconstruction:
+  context_length: 512
+  batch_size: 8
+
+outputs_root: outputs/runs
