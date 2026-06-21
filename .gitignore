@@ -17,7 +17,7 @@ env/
 
 # Data
 data/raw/
-data/processed/
+data/prepared/
 *.zip
 *.tar
 *.tar.gz
@@ -38,6 +38,8 @@ external/
 # Outputs
 outputs/
 runs/
+!configs/runs/
+!configs/runs/*.yaml
 wandb/
 logs/
 
