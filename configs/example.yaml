@@ -1,55 +1,81 @@
+# Names the output directory under outputs_root.
 run_id: example-run-v1
-overwrite: true 
 
+# false rejects an existing run directory; true allows files to be replaced.
+overwrite: true
+
+# Include either supported task or both tasks.
 run_tasks:
   - reconstruction
   - dependency_maps
 
 dataset:
+  # Stored in manifests and result tables.
   dataset_id: ribosome
+  # Must contain records.parquet and regions.parquet.
   prepared_dir: data/prepared/ribosome
 
 model:
+  # Selects one nested model block below. The other block is ignored.
   adapter: random
 
+  # Pipeline smoke-test model. Its scores are not scientifically meaningful.
   random:
+    # Makes random smoke-test outputs reproducible.
     seed: 42
+    # Maximum sequence length accepted by this adapter.
     max_context_length: 1022
+
   rinalmo:
+    # This repository currently supports only the micro model size.
     size: micro
+    # Checkpoint path relative to the repository root.
     weights: models/rinalmo/rinalmo_micro_pretrained.pt
+    # PyTorch inference device. CUDA must be available for cuda:0.
     device: cuda:0
 
 reconstruction:
+  # Context around each masked target; it must fit the model context limit.
   context_length: 512
+  # Number of target contexts passed through the model per batch.
   batch_size: 8
+  # Write summary plots from the per-region reconstruction results.
   plot_results: true
 
 dependency_maps:
+  # Selects either the manual or region block below. The other block is ignored.
   mode: region
+  # Controls batching in dependency-map model forward calls.
   batch_size: 8
+  # false substitutes query bases; true masks query positions.
   dependency_by_masking: false
+  # Also store reconstruction probabilities in each saved map result.
   with_reconstruction: true
-  manual:
-    start: 4000
-    end: 43
-    record_ids:
-      - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
-      - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
-  region:
-    # Matches an exact label or feature_type value.
-    label: 18S_rRNA
-    # record_ids: all
-    # record_ids can instead be a non-empty explicit list:
-    record_ids:
-      - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
-      - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
-    # error rejects regions longer than the model context. tile creates
-    # overlapping local maps, which cannot recover interactions between bases
-    # that never occur in the same tile.
-    long_region_policy: tile
-    tile_length: 512
-    tile_stride: 384
-  
 
+  manual:
+    # Apply this 0-based, end-exclusive interval to every listed record.
+    start: 4000
+    end: 4100
+    # Values must exactly match prepared record_id values.
+    record_ids:
+      - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
+      - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
+
+  region:
+    # Exact match against the prepared label or feature_type column.
+    label: 18S_rRNA
+    # Use "all" for every matching record, or a non-empty explicit list.
+    # record_ids: all
+    record_ids:
+      - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
+      - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
+    # error rejects long regions; tile creates overlapping local maps.
+    # Tiles cannot connect positions that never occur together in one tile.
+    long_region_policy: tile
+    # Tile size for long regions; it must not exceed the model context limit.
+    tile_length: 512
+    # Distance between regular tile starts; smaller values increase overlap.
+    tile_stride: 384
+
+# Parent directory for run_id output directories, relative to the repository.
 outputs_root: outputs/runs
