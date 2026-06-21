@@ -30,6 +30,7 @@ def main():
     from glmfe.seq_models.random import RandomSequenceModel
     from glmfe.tasks.reconstruction import run_reconstruction
     from glmfe.tasks.dependency_maps import run_dependency_maps
+    from glmfe.tasks.plots import plot_reconstruction_results
 
     run_config_path = repository_root / sys.argv[1]
     with run_config_path.open() as handle:
@@ -73,6 +74,7 @@ def main():
         if task == "reconstruction":
             reconstruction_dir = run_dir / "reconstruction"
             reconstruction_dir.mkdir(exist_ok=overwrite)
+            plot_results = bool(run_config["reconstruction"]["plot_results"])
 
             # Reconstruct each unique annotated base once, then aggregate those
             # results back into every annotation region that contains the base.
@@ -88,6 +90,8 @@ def main():
             )
             per_base.to_csv(reconstruction_dir / "per_base.csv", index=False)
             per_region.to_csv(reconstruction_dir / "per_region.csv", index=False)
+            if plot_results:
+                plot_reconstruction_results(per_region, reconstruction_dir / "plots")
             task_results["reconstruction"] = per_base
         elif task == "dependency_maps":
             map_index = run_dependency_maps(

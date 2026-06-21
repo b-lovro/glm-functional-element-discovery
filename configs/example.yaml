@@ -1,8 +1,8 @@
-run_id: example-run-v3
-overwrite: true 
+run_id: example-run-v1
+overwrite: false 
 
 run_tasks:
-  # - reconstruction
+  - reconstruction
   - dependency_maps
 
 dataset:
@@ -23,6 +23,7 @@ model:
 reconstruction:
   context_length: 512
   batch_size: 8
+  plot_results: true
 
 dependency_maps:
   mode: manual
@@ -33,6 +34,6 @@ dependency_maps:
     - map_id: example-window-001
       record_id: Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
       start: 4000
-      end: 4999
+      end: 4100
 
 outputs_root: outputs/runs
