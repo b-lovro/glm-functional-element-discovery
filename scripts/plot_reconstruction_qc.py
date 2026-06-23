@@ -70,47 +70,84 @@ def save_boxplot(
     rng: np.random.Generator,
 ) -> None:
     counts = per_region["feature_type"].value_counts()
+
     values = [
         per_region.loc[
             per_region["feature_type"] == feature_type,
             value_column,
-        ]
+        ].dropna().to_numpy()
         for feature_type in feature_order
     ]
+
     labels = [
         f"{feature_type}\n(n={int(counts.loc[feature_type])})"
         for feature_type in feature_order
     ]
 
     figure, axis = plt.subplots(figsize=(12, 7))
-    axis.boxplot(values, showfliers=True)
-    axis.set_xticks(range(1, len(labels) + 1))
-    axis.set_xticklabels(labels)
 
+    # Raw points: visible, but kept behind the boxplot.
     for position, feature_values in enumerate(values, start=1):
-        jitter = rng.uniform(-0.12, 0.12, size=len(feature_values))
+        jitter = rng.uniform(-0.18, 0.18, size=len(feature_values))
         axis.scatter(
             position + jitter,
             feature_values,
-            s=12,
-            alpha=0.35,
+            s=10,
+            alpha=0.60,
             color="#4C78A8",
-            edgecolors="none",
+            edgecolors="white",
+            linewidths=0.25,
+            zorder=1,
         )
+
+    # Boxplot layered above the points.
+    axis.boxplot(
+        values,
+        positions=range(1, len(values) + 1),
+        widths=0.55,
+        patch_artist=True,
+        showfliers=False,
+        medianprops={
+            "color": "black",
+            "linewidth": 2.2,
+        },
+        boxprops={
+            "facecolor": "#A6C8E0",
+            "edgecolor": "#1F4E79",
+            "linewidth": 1.8,
+            "alpha": 0.85,
+        },
+        whiskerprops={
+            "color": "#1F4E79",
+            "linewidth": 1.5,
+        },
+        capprops={
+            "color": "#1F4E79",
+            "linewidth": 1.5,
+        },
+        zorder=2,
+    )
+
+    axis.set_xticks(range(1, len(labels) + 1))
+    axis.set_xticklabels(labels)
 
     if y_limits is not None:
         axis.set_ylim(y_limits)
+
     if reference_line is not None:
         axis.axhline(
             reference_line,
             color="#E45756",
             linestyle="--",
             linewidth=1.5,
+            zorder=0,
         )
+
     axis.set_xlabel("Feature type")
     axis.set_ylabel(y_label)
     axis.set_title(title)
     axis.tick_params(axis="x", rotation=45)
+
     figure.tight_layout()
     figure.savefig(output_path, dpi=300)
     plt.close(figure)

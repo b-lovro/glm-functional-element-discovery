@@ -24,9 +24,10 @@ def main():
     sys.path.insert(0, str(repository_root / "src"))
 
     from glmfe.datasets.prepared import load_prepared_dataset
-    from glmfe.seq_models.rinalmo import load_rinalmo_model
+    #from glmfe.seq_models.rinalmo import load_rinalmo_model
     from glmfe.seq_models.random import RandomSequenceModel
     from glmfe.tasks.reconstruction import run_reconstruction
+    #from glmfe.seq_models.evo2 import load_evo2_model
 
     run_config_path = repository_root / sys.argv[1]
     with run_config_path.open() as handle:
@@ -41,18 +42,21 @@ def main():
     adapter = run_config["model"]["adapter"]
     weights_path = None
     if adapter == "rinalmo":
+        from glmfe.seq_models.rinalmo import load_rinalmo_model
         weights_path = repository_root / run_config["model"]["weights"]
         model = load_rinalmo_model(
             run_config["model"]["size"],
             weights_path,
             run_config["model"]["device"],
         )
+    elif adapter == "evo2":
+        from glmfe.seq_models.evo2 import load_evo2_model
+        model = load_evo2_model(
+            run_config["model"]["model_name"],
+            run_config["model"]["device"],
+        )
     elif adapter == "random":
         model = RandomSequenceModel()
-    else:
-        raise ValueError(
-            f"Unsupported model adapter: {adapter}"
-        )
     
     outputs_root = repository_root / run_config["outputs_root"]
 
