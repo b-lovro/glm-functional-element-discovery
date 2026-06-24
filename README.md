@@ -6,7 +6,8 @@ This repository evaluates sequence language models on prepared ribosome
 sequences and annotation intervals. It currently implements:
 
 - masked single-base reconstruction;
-- nucleotide dependency maps.
+- nucleotide dependency maps;
+- block scores from saved dependency maps.
 
 The implemented model adapters are:
 
@@ -146,6 +147,14 @@ outputs/runs/<run_id>/
         <map_id>.npz
         <map_id>.html
         <map_id>.pdf
+  block_scores/
+    per_span.parquet
+    per_map.parquet
+    plots/
+      max_block_score_by_feature_type.png
+      median_block_score_by_feature_type.png
+      <map_id>_block_score_track.png
+      <map_id>_block_score_track.pdf
 ```
 
 - `manifest.json` records the run identity, model configuration, selected
@@ -155,6 +164,7 @@ outputs/runs/<run_id>/
   summary plots.
 - dependency maps are grouped by source record and include compressed `.npz`
   arrays, standalone interactive HTML plots, and PDF plots.
+- block scores summarize consecutive diagonal spans from saved dependency maps.
 
 ## Configuration guide
 
@@ -176,10 +186,19 @@ replace files at the same output paths.
 run_tasks:
   - reconstruction
   - dependency_maps
+  - block_scores
 ```
 
-The supported tasks are `reconstruction` and `dependency_maps`. A run may
-include either task or both.
+The supported tasks are `reconstruction`, `dependency_maps`, and
+`block_scores`. In a combined run, `block_scores` should appear after
+`dependency_maps` because it post-processes saved maps from the same run. To
+score maps from an existing run without model inference, set `run_id` to that
+existing run directory and use:
+
+```yaml
+run_tasks:
+  - block_scores
+```
 
 ### `dataset`
 
@@ -323,6 +342,27 @@ dependency_maps:
 Tiled maps capture local dependencies only. They cannot recover interactions
 between positions that never occur together in the same tile.
 
+### `block_scores`
+
+```yaml
+block_scores:
+  block_size: 6
+  quantile: 0.25
+  plot_results: true
+```
+
+Block scores are computed from saved dependency maps and do not run model
+inference. One row in `block_scores/per_span.parquet` corresponds to one
+consecutive diagonal span within one dependency map. The default score is the
+first quartile of the off-diagonal directed dependencies in a 6x6 block.
+Overlapping map tiles are intentionally retained independently at this stage.
+When `block_scores` is run by itself, the evaluator reads
+`dependency_maps/map_index.parquet` from the selected run directory and does
+not load a model.
+`plot_results: true` writes descriptive feature-type boxplots using one value
+per map and companion plots that align each block-score track with its source
+dependency-map heatmap.
+
 ### `outputs_root`
 
 ```yaml
@@ -341,6 +381,12 @@ a directory named by `run_id`.
 - `dependency_maps/map_index.parquet` is the authoritative table linking every
   map to its record, coordinates, source annotation, tile metadata, and output
   files.
+- `block_scores/per_span.parquet` contains one block score per consecutive
+  diagonal span in each saved dependency map.
+- `block_scores/per_map.parquet` summarizes the span scores for each source
+  dependency map.
+- `block_scores/plots/` contains descriptive per-map summaries by feature type
+  and one block-score track plus dependency-map heatmap companion plot per map.
 - Dependency-map coordinates are always relative to the original full source
   record.
 - For tiled region maps, `region_start` and `region_end` describe the complete

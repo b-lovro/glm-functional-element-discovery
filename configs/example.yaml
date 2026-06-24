@@ -4,10 +4,11 @@ run_id: example-run-v1
 # false rejects an existing run directory; true allows files to be replaced.
 overwrite: true
 
-# Include either supported task or both tasks.
+# Include any supported task; block_scores can also run alone on an existing run.
 run_tasks:
-  - reconstruction
-  - dependency_maps
+  # - reconstruction
+  # - dependency_maps
+  - block_scores
 
 dataset:
   # Stored in manifests and result tables.
@@ -52,7 +53,7 @@ reconstruction:
 
 dependency_maps:
   # Selects either the manual or region block below. The other block is ignored.
-  mode: region
+  mode: manual
   # Controls batching in dependency-map model forward calls.
   batch_size: 8
   # false substitutes query bases; true masks query positions.
@@ -67,7 +68,7 @@ dependency_maps:
     # Values must exactly match prepared record_id values.
     record_ids:
       - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
-      - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
+      # - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
 
   region:
     # Exact match against the prepared label or feature_type column.
@@ -76,7 +77,7 @@ dependency_maps:
     # record_ids: all
     record_ids:
       - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
-      - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
+      # - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1
     # error rejects long regions; tile creates overlapping local maps.
     # Tiles cannot connect positions that never occur together in one tile.
     long_region_policy: tile
@@ -84,6 +85,14 @@ dependency_maps:
     tile_length: 512
     # Distance between regular tile starts; smaller values increase overlap.
     tile_stride: 384
+
+block_scores:
+  # Width of the consecutive diagonal dependency block in nucleotides.
+  block_size: 6
+  # First quartile of off-diagonal directed dependencies within each block.
+  quantile: 0.25
+  # Write descriptive summary and per-map companion plots.
+  plot_results: true
 
 # Parent directory for run_id output directories, relative to the repository.
 outputs_root: outputs/runs
