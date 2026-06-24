@@ -1,6 +1,6 @@
 """Run configured evaluation tasks and write their result tables.
 
-The script loads a prepared dataset and model from YAML configuration, dispatches
+The script loads the prepared dataset and model for inference tasks, dispatches
 the requested tasks, and writes the run manifest and task outputs to a dedicated
 folder.
 """
@@ -11,7 +11,9 @@ from pathlib import Path
 
 import yaml
 
-SUPPORTED_TASKS = {"reconstruction", "dependency_maps"}
+SUPPORTED_TASKS = {"reconstruction", "dependency_maps", "block_scores"}
+MODEL_TASKS = {"reconstruction", "dependency_maps"}
+
 
 def main():
     if len(sys.argv) != 2:
@@ -30,62 +32,85 @@ def main():
         if dependency_map_src.is_dir():
             sys.path.insert(0, str(dependency_map_src))
 
-    from glmfe.datasets.prepared import load_prepared_dataset
-    from glmfe.tasks.reconstruction import run_reconstruction
-
     run_config_path = repository_root / sys.argv[1]
     with run_config_path.open() as handle:
         run_config = yaml.safe_load(handle)
 
     run_tasks = run_config["run_tasks"]
-
-    # Load and validate the canonical records and half-open annotation intervals.
-    dataset = run_config["dataset"]
-    prepared_dir = repository_root / dataset["prepared_dir"]
-    records, regions = load_prepared_dataset(prepared_dir)
-
-    # Construct the model adapter
-    adapter = run_config["model"]["adapter"]
-    weights_path = None
-    model_config = run_config["model"][adapter]
-    if adapter == "rinalmo":
-        from glmfe.seq_models.rinalmo import load_rinalmo_model
-
-        model = load_rinalmo_model(
-            model_size=model_config["size"],
-            weights_path=repository_root / model_config["weights"],
-            device=model_config["device"],
+    unsupported_tasks = sorted(set(run_tasks) - SUPPORTED_TASKS)
+    if unsupported_tasks:
+        raise ValueError(
+            "Unsupported task(s) in run_tasks: "
+            + ", ".join(unsupported_tasks)
         )
-    elif adapter == "evo2":
-        from glmfe.seq_models.evo2 import load_evo2_model
-
-        cache_dir = model_config.get("cache_dir")
-        model = load_evo2_model(
-            model_name=model_config["model_name"],
-            device=model_config["device"],
-            cache_dir=repository_root / cache_dir if cache_dir else None,
-        )
-    elif adapter == "random":
-        from glmfe.seq_models.random import RandomSequenceModel
-
-        model = RandomSequenceModel(
-            seed=model_config["seed"],
-            max_context_length=model_config["max_context_length"],
-        )
-    else:
-        raise ValueError(f"Unsupported model adapter: {adapter}")
 
     outputs_root = repository_root / run_config["outputs_root"]
-
-    # Reserve the output directory before expensive inference and never overwrite
-    # an existing run with the same run_id unless overwrite=true in config file.
     overwrite = bool(run_config["overwrite"])
     run_dir = outputs_root / run_config["run_id"]
-    run_dir.mkdir(parents=True, exist_ok=overwrite)
-    checkpoint_tag = weights_path.stem if weights_path else None
+    model_tasks = [task for task in run_tasks if task in MODEL_TASKS]
+    postprocess_only = len(model_tasks) == 0
+    if postprocess_only:
+        if not run_dir.is_dir():
+            raise ValueError(
+                "block_scores-only runs require an existing run directory "
+                f"with dependency maps: {run_dir}"
+            )
+    else:
+        # Reserve the output directory before expensive inference and never
+        # overwrite an existing run with the same run_id unless overwrite=true
+        # in the config file.
+        run_dir.mkdir(parents=True, exist_ok=overwrite)
+
+    dataset = None
+    records = None
+    regions = None
+    model = None
+    checkpoint_tag = None
+    if not postprocess_only:
+        from glmfe.datasets.prepared import load_prepared_dataset
+
+        # Load and validate the canonical records and half-open annotation intervals.
+        dataset = run_config["dataset"]
+        prepared_dir = repository_root / dataset["prepared_dir"]
+        records, regions = load_prepared_dataset(prepared_dir)
+
+        # Construct the model adapter.
+        adapter = run_config["model"]["adapter"]
+        weights_path = None
+        model_config = run_config["model"][adapter]
+        if adapter == "rinalmo":
+            from glmfe.seq_models.rinalmo import load_rinalmo_model
+
+            model = load_rinalmo_model(
+                model_size=model_config["size"],
+                weights_path=repository_root / model_config["weights"],
+                device=model_config["device"],
+            )
+        elif adapter == "evo2":
+            from glmfe.seq_models.evo2 import load_evo2_model
+
+            cache_dir = model_config.get("cache_dir")
+            model = load_evo2_model(
+                model_name=model_config["model_name"],
+                device=model_config["device"],
+                cache_dir=repository_root / cache_dir if cache_dir else None,
+            )
+        elif adapter == "random":
+            from glmfe.seq_models.random import RandomSequenceModel
+
+            model = RandomSequenceModel(
+                seed=model_config["seed"],
+                max_context_length=model_config["max_context_length"],
+            )
+        else:
+            raise ValueError(f"Unsupported model adapter: {adapter}")
+        checkpoint_tag = weights_path.stem if weights_path else None
+
     task_results = {}
     for task in run_tasks:
         if task == "reconstruction":
+            from glmfe.tasks.reconstruction import run_reconstruction
+
             reconstruction_dir = run_dir / "reconstruction"
             reconstruction_dir.mkdir(exist_ok=overwrite)
             plot_results = bool(run_config["reconstruction"]["plot_results"])
@@ -124,43 +149,109 @@ def main():
                 overwrite,
             )
             task_results["dependency_maps"] = map_index
+        elif task == "block_scores":
+            from glmfe.tasks.block_scores import run_block_scores
+
+            plot_results = bool(run_config["block_scores"]["plot_results"])
+            if "dependency_maps" in task_results:
+                map_index = task_results["dependency_maps"]
+            else:
+                import pandas as pd
+
+                map_index_path = (
+                    run_dir / "dependency_maps" / "map_index.parquet"
+                )
+                if not map_index_path.exists():
+                    raise ValueError(
+                        "block_scores requires dependency_maps earlier in "
+                        "run_tasks or an existing "
+                        "dependency_maps/map_index.parquet in the run "
+                        f"directory: {run_dir}"
+                    )
+                map_index = pd.read_parquet(
+                    map_index_path,
+                    engine="pyarrow",
+                )
+                task_results["dependency_maps"] = map_index
+            per_span, per_map = run_block_scores(
+                map_index,
+                run_config["block_scores"],
+                run_dir,
+                overwrite,
+            )
+            if plot_results:
+                from glmfe.tasks.plots import plot_block_score_results
+
+                plot_block_score_results(
+                    per_span,
+                    per_map,
+                    map_index,
+                    run_dir,
+                )
+            task_results["block_scores"] = (per_span, per_map)
 
     # Write the compact run manifest directly from the resolved configuration.
-    manifest = {
-        "run_id": run_config["run_id"],
-        "dataset_id": dataset["dataset_id"],
-        "model": run_config["model"],
-        "run_tasks": run_tasks,
-        "records_path": str(
-            Path(dataset["prepared_dir"]) / "records.parquet"
-        ),
-        "regions_path": str(
-            Path(dataset["prepared_dir"]) / "regions.parquet"
-        ),
-        "record_count": len(records),
-        "region_count": len(regions),
-    }
+    manifest_path = run_dir / "manifest.json"
+    if postprocess_only and manifest_path.exists():
+        with manifest_path.open() as handle:
+            manifest = json.load(handle)
+        manifest_tasks = list(manifest["run_tasks"])
+        if "block_scores" not in manifest_tasks:
+            manifest_tasks.append("block_scores")
+        manifest["run_tasks"] = manifest_tasks
+    else:
+        manifest = {
+            "run_id": run_config["run_id"],
+            "run_tasks": run_tasks,
+        }
+        if dataset is not None:
+            manifest["dataset_id"] = dataset["dataset_id"]
+            manifest["records_path"] = str(
+                Path(dataset["prepared_dir"]) / "records.parquet"
+            )
+            manifest["regions_path"] = str(
+                Path(dataset["prepared_dir"]) / "regions.parquet"
+            )
+            manifest["record_count"] = len(records)
+            manifest["region_count"] = len(regions)
+        if model is not None:
+            manifest["model"] = run_config["model"]
     if "reconstruction" in run_tasks:
         manifest["reconstruction"] = run_config["reconstruction"]
         manifest["unique_target_count"] = len(task_results["reconstruction"])
     if "dependency_maps" in run_tasks:
         manifest["dependency_maps"] = run_config["dependency_maps"]
         manifest["dependency_map_count"] = len(task_results["dependency_maps"])
-        
-    with (run_dir / "manifest.json").open("w") as handle:
+    if "block_scores" in run_tasks:
+        per_span, per_map = task_results["block_scores"]
+        manifest["block_scores"] = run_config["block_scores"]
+        manifest["block_score_span_count"] = len(per_span)
+        manifest["block_score_map_count"] = len(per_map)
+
+    with manifest_path.open("w") as handle:
         json.dump(manifest, handle, indent=2)
         handle.write("\n")
 
-    with (run_dir / "config.resolved.yaml").open("w") as handle:
-        yaml.safe_dump(run_config, handle, sort_keys=False)
+    resolved_config_path = run_dir / "config.resolved.yaml"
+    if not postprocess_only or overwrite or not resolved_config_path.exists():
+        with resolved_config_path.open("w") as handle:
+            yaml.safe_dump(run_config, handle, sort_keys=False)
 
     print(f"Run: {run_config['run_id']}")
-    print(f"Records: {len(records)}")
-    print(f"Regions: {len(regions)}")
+    if records is not None:
+        print(f"Records: {len(records)}")
+    if regions is not None:
+        print(f"Regions: {len(regions)}")
     if "reconstruction" in run_tasks:
         print("Unique annotated bases: " f"{len(task_results['reconstruction'])}")
     if "dependency_maps" in run_tasks:
         print("Dependency maps: " f"{len(task_results['dependency_maps'])}")
+    if "block_scores" in run_tasks:
+        per_span, per_map = task_results["block_scores"]
+        print(
+            "Block scores: "
+            f"{len(per_span)} spans, {len(per_map)} maps"
+        )
     print(f"Output: {run_dir}")
 
 
