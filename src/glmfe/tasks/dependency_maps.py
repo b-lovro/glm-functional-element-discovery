@@ -202,6 +202,7 @@ def run_dependency_maps(
     options = DependencyMapOptions(
         dependency_by_masking=dependency_by_masking,
         with_reconstruction=with_reconstruction,
+        autoregressive=bool(getattr(model, "dependency_autoregressive", False)), #Evo2 is autoregressive
     )
 
     def tokenize_func(sequence: str, mask: int | None) -> object:

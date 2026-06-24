@@ -22,15 +22,16 @@ def main():
     # Resolve project imports and all configured relative paths from the repo root.
     repository_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repository_root / "src"))
-    dependency_map_src = repository_root / "external" / "dependency_map" / "src"
-    sys.path.insert(0, str(dependency_map_src))
+    dependency_map_sources = (
+        repository_root / "external" / "dependency_map" / "src",
+        repository_root / "external" / "dependency-map" / "src",
+    )
+    for dependency_map_src in dependency_map_sources:
+        if dependency_map_src.is_dir():
+            sys.path.insert(0, str(dependency_map_src))
 
     from glmfe.datasets.prepared import load_prepared_dataset
-    from glmfe.seq_models.rinalmo import load_rinalmo_model
-    from glmfe.seq_models.random import RandomSequenceModel
     from glmfe.tasks.reconstruction import run_reconstruction
-    from glmfe.tasks.dependency_maps import run_dependency_maps
-    from glmfe.tasks.plots import plot_reconstruction_results
 
     run_config_path = repository_root / sys.argv[1]
     with run_config_path.open() as handle:
@@ -48,16 +49,29 @@ def main():
     weights_path = None
     model_config = run_config["model"][adapter]
     if adapter == "rinalmo":
+        from glmfe.seq_models.rinalmo import load_rinalmo_model
+
         model = load_rinalmo_model(
             model_size=model_config["size"],
             weights_path=repository_root / model_config["weights"],
             device=model_config["device"],
         )
+    elif adapter == "evo2":
+        from glmfe.seq_models.evo2 import load_evo2_model
+
+        cache_dir = model_config.get("cache_dir")
+        model = load_evo2_model(
+            model_name=model_config["model_name"],
+            device=model_config["device"],
+            cache_dir=repository_root / cache_dir if cache_dir else None,
+        )
     elif adapter == "random":
+        from glmfe.seq_models.random import RandomSequenceModel
+
         model = RandomSequenceModel(
-            seed=model_config["seed"], 
+            seed=model_config["seed"],
             max_context_length=model_config["max_context_length"],
-            )
+        )
     else:
         raise ValueError(f"Unsupported model adapter: {adapter}")
 
@@ -91,9 +105,13 @@ def main():
             per_base.to_csv(reconstruction_dir / "per_base.csv", index=False)
             per_region.to_csv(reconstruction_dir / "per_region.csv", index=False)
             if plot_results:
+                from glmfe.tasks.plots import plot_reconstruction_results
+
                 plot_reconstruction_results(per_region, reconstruction_dir / "plots")
             task_results["reconstruction"] = per_base
         elif task == "dependency_maps":
+            from glmfe.tasks.dependency_maps import run_dependency_maps
+
             map_index = run_dependency_maps(
                 records,
                 regions,
