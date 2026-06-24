@@ -16,6 +16,7 @@ from matplotlib import colormaps
 import numpy as np
 import pandas as pd
 from dependency_map import DependencyMap, DependencyMapOptions
+from tqdm import tqdm
 
 from glmfe.seq_models.base import BaseSequenceModel
 
@@ -202,7 +203,16 @@ def run_dependency_maps(
     options = DependencyMapOptions(
         dependency_by_masking=dependency_by_masking,
         with_reconstruction=with_reconstruction,
-        autoregressive=bool(getattr(model, "dependency_autoregressive", False)), #Evo2 is autoregressive
+        autoregressive=bool(
+            getattr(model, "dependency_autoregressive", False)
+        ),
+    )
+    print(
+        "Dependency maps: "
+        f"{len(jobs)} job(s), mode={mode}, batch_size={batch_size}, "
+        f"autoregressive={options.autoregressive}, "
+        f"dependency_by_masking={dependency_by_masking}, "
+        f"with_reconstruction={with_reconstruction}"
     )
 
     def tokenize_func(sequence: str, mask: int | None) -> object:
@@ -215,7 +225,7 @@ def run_dependency_maps(
 
     rows = []
     # Process every job through shared validation, inference, and output logic.
-    for job in jobs:
+    for job in tqdm(jobs, desc="Dependency maps", unit="map"):
         map_id = job["map_id"]
         record_id = job["record_id"]
         start = job["start"]
@@ -248,6 +258,13 @@ def run_dependency_maps(
                 f"{model.max_context_length}"
             )
 
+        sample_count = options.num_samples(len(window_sequence))
+        tqdm.write(
+            "Computing dependency map "
+            f"{map_id}: record={record_id}, window=[{start}, {end}), "
+            f"length={len(window_sequence)}, samples={sample_count}"
+        )
+
         # Compute and save raw map arrays.
         result = DependencyMap.compute_batched(
             window_sequence,
@@ -266,6 +283,7 @@ def run_dependency_maps(
         if result.reconstruction is not None:
             arrays["reconstruction"] = result.reconstruction
         np.savez_compressed(map_path, **arrays)
+        tqdm.write(f"Writing dependency map plots: {map_id}")
 
         # Create and save visualizations.
         relative_html_plot_path = (
@@ -344,6 +362,7 @@ def run_dependency_maps(
             output_dir / relative_pdf_plot_path,
             format="pdf",
         )
+        tqdm.write(f"Finished dependency map: {map_id}")
 
         rows.append(
             {
