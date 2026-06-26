@@ -37,4 +37,7 @@ sed -i 's/"numpy>=2"/"numpy<2"/g' external/dependency_map/pyproject.toml
 "$ENV_PREFIX/bin/python" -m pip install kaleido
 "$ENV_PREFIX/bin/plotly_get_chrome"
 
+# Install project-specific requirements with pinned versions for compatibility
+"$ENV_PREFIX/bin/python" -m pip install -r requirements.txt
+
 echo "DONE: $ENV_PREFIX"

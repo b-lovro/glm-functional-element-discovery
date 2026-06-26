@@ -192,6 +192,21 @@ class Evo2SequenceModel(BaseSequenceModel):
             )
         return result
 
+    def prepare_for_training(self, lora_config: dict) -> None:
+        raise NotImplementedError("Training not yet implemented for Evo2")
+
+    def get_trainable_parameters(self) -> filter:
+        raise NotImplementedError("Training not yet implemented for Evo2")
+
+    def compute_pretraining_loss(
+        self, 
+        sequences: list[str],
+        is_start: list[bool] | None = None,
+        is_end: list[bool] | None = None,
+    ) -> object:
+        raise NotImplementedError("Evo2 pretraining is not implemented yet.")
+
+
 
 def load_evo2_model(
     model_name: str,

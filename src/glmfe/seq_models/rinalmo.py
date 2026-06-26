@@ -23,8 +23,14 @@ class RiNALMoSequenceModel(BaseSequenceModel):
         self.model_id = f"rinalmo-{model_size}"
         self.reconstruction_protocol = "masked_single_base"
         self.max_context_length = 1022
+        valid_bases = "ACGTNRYKMSWBDHVI-"
         self.nucleotide_token_indices = torch.tensor(
-            [alphabet.tkn_to_idx[base] for base in "ACGT"],
+            [alphabet.tkn_to_idx[base] for base in valid_bases if base in alphabet.tkn_to_idx],
+            dtype=torch.int64,
+            device=device,
+        )
+        self.random_replace_indices = torch.tensor(
+            [alphabet.tkn_to_idx[base] for base in "ACGTN" if base in alphabet.tkn_to_idx],
             dtype=torch.int64,
             device=device,
         )
@@ -49,8 +55,8 @@ class RiNALMoSequenceModel(BaseSequenceModel):
                         f"Context length {len(sequence)} exceeds "
                         f"{self.max_context_length}"
                     )
-                if set(sequence) - set("ACGT"):
-                    raise ValueError("RiNALMo contexts must contain only A/C/G/T")
+                if set(sequence) - set("ACGTNRYKMSWBDHVI-"):
+                    raise ValueError("RiNALMo contexts contain unsupported characters")
                 if not 0 <= target_position < len(sequence):
                     raise ValueError(
                         f"Invalid context target position {target_position} "
@@ -100,8 +106,8 @@ class RiNALMoSequenceModel(BaseSequenceModel):
                 f"Context length {len(sequence)} exceeds "
                 f"{self.max_context_length}"
             )
-        if set(sequence) - set("ACGT"):
-            raise ValueError("RiNALMo contexts must contain only A/C/G/T/U")
+        if set(sequence) - set("ACGTNRYKMSWBDHVI-"):
+            raise ValueError("RiNALMo contexts contain unsupported characters")
         if mask_position is not None and not 0 <= mask_position < len(sequence):
             raise ValueError(
                 f"Invalid mask position {mask_position} "
@@ -171,6 +177,137 @@ class RiNALMoSequenceModel(BaseSequenceModel):
                 f"{result.shape}; expected {expected_shape}"
             )
         return result
+
+    def prepare_for_training(self, lora_config: dict) -> None:
+        import torch.nn as nn
+        from peft import LoraConfig, get_peft_model
+        
+        target_modules = lora_config["target_modules"]
+        if target_modules == "all-linear" or target_modules == ["all-linear"]:
+            target_modules = set()
+            for name, module in self.model.named_modules():
+                if isinstance(module, nn.Linear):
+                    target_modules.add(name)
+            target_modules = list(target_modules)
+            
+        peft_config = LoraConfig(
+            r=lora_config["r"],
+            lora_alpha=lora_config["alpha"],
+            target_modules=target_modules,
+            lora_dropout=lora_config["dropout"],
+            bias="none",
+        )
+        self.model = get_peft_model(self.model, peft_config)
+        self.model.train()
+
+    def get_trainable_parameters(self) -> filter:
+        return filter(lambda p: p.requires_grad, self.model.parameters())
+
+    def compute_pretraining_loss(
+        self, 
+        sequences: list[str],
+        is_start: list[bool] | None = None,
+        is_end: list[bool] | None = None,
+        deterministic_mask: bool = False,
+    ) -> object:
+        import torch.nn.functional as F
+
+        sanitized_sequences = []
+        for sequence in sequences:
+            if len(sequence) > self.max_context_length:
+                raise ValueError(
+                    f"Context length {len(sequence)} exceeds "
+                    f"{self.max_context_length}"
+                )
+            seq = sequence.upper().replace('U', 'T')
+            sanitized_sequences.append(seq)
+        sequences = sanitized_sequences
+                
+        if is_start is not None and hasattr(is_start, "tolist"):
+            is_start = is_start.tolist()
+        if is_end is not None and hasattr(is_end, "tolist"):
+            is_end = is_end.tolist()
+            
+        if is_start is None:
+            is_start = [True] * len(sequences)
+        if is_end is None:
+            is_end = [True] * len(sequences)
+
+        batch_tokens = []
+        max_len = 0
+        for seq, start_flag, end_flag in zip(sequences, is_start, is_end, strict=True):
+            tokens = self.alphabet.batch_tokenize([seq])[0]
+            if not start_flag:
+                tokens = tokens[1:]
+            if not end_flag:
+                tokens = tokens[:-1]
+            batch_tokens.append(tokens)
+            if len(tokens) > max_len:
+                max_len = len(tokens)
+                
+        pad_idx = self.alphabet.pad_idx
+        padded_tokens = []
+        for t in batch_tokens:
+            padded_tokens.append(t + [pad_idx] * (max_len - len(t)))
+
+        # tokens shape: (Batch, SeqLen)
+        tokens = torch.tensor(
+            padded_tokens,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        
+        labels = tokens.clone()
+        
+        # Identify valid nucleotide positions
+        is_nucleotide = torch.isin(tokens, self.nucleotide_token_indices)
+        
+        prob_matrix = torch.full(tokens.shape, 0.0, device=self.device)
+        prob_matrix[is_nucleotide] = 0.15
+        
+        if deterministic_mask:
+            g = torch.Generator(device=self.device)
+            g.manual_seed(42)
+            masked_indices = torch.bernoulli(prob_matrix, generator=g).bool()
+            rand = torch.rand(tokens.shape, generator=g, device=self.device)
+        else:
+            masked_indices = torch.bernoulli(prob_matrix).bool()
+            rand = torch.rand(tokens.shape, device=self.device)
+        
+        # 80% of 15% -> [MASK] token
+        replace_mask = masked_indices & (rand < 0.8)
+        tokens[replace_mask] = self.alphabet.mask_idx
+        
+        # 10% of 15% -> Random nucleotide
+        replace_random = masked_indices & (rand >= 0.8) & (rand < 0.9)
+        if replace_random.any():
+            random_nucleotides = self.random_replace_indices[
+                torch.randint(
+                    0, len(self.random_replace_indices), 
+                    (replace_random.sum().item(),), 
+                    device=self.device
+                )
+            ]
+            tokens[replace_random] = random_nucleotides
+            
+        # Remaining 10% is left intact
+        
+        # Only compute loss on masked_indices
+        labels[~masked_indices] = -100
+        
+        with torch.amp.autocast(device_type=self.device.type):
+            # logits shape: (Batch, SeqLen, Vocab)
+            logits = self.model(tokens)["logits"]
+            
+        # loss is scalar
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)), 
+            labels.view(-1), 
+            ignore_index=-100
+        )
+        
+        return loss
+
 
 
 def load_rinalmo_model(

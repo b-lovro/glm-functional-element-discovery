@@ -32,3 +32,21 @@ class BaseSequenceModel(ABC):
         batch_size: int,
     ) -> np.ndarray:
         ...
+
+    @abstractmethod
+    def prepare_for_training(self, lora_config: dict) -> None:
+        ...
+
+    @abstractmethod
+    def get_trainable_parameters(self) -> filter:
+        ...
+
+    @abstractmethod
+    def compute_pretraining_loss(
+        self, 
+        sequences: list[str],
+        is_start: list[bool] | None = None,
+        is_end: list[bool] | None = None,
+    ) -> object: # Returns torch.Tensor but we use object to avoid importing torch in base.py
+        ...
+
