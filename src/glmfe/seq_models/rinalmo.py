@@ -315,8 +315,6 @@ def load_rinalmo_model(
     weights_path: Path,
     device: str,
 ) -> RiNALMoSequenceModel:
-    if model_size != "micro":
-        raise ValueError(f"Unsupported RiNALMo model size: {model_size}")
     if not weights_path.is_file():
         raise FileNotFoundError(f"Missing RiNALMo weights: {weights_path}")
 
