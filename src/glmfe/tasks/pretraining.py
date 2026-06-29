@@ -228,8 +228,13 @@ def run_pretraining(
                     val_loss_sum += loss.item()
             
             avg_val_loss = val_loss_sum / len(val_dataloader)
-            wandb.log({"val/epoch_loss": avg_val_loss, "epoch": epoch}, step=global_step)
-            print(f"Epoch {epoch} Validation Loss: {avg_val_loss:.4f}")
+            val_perplexity = torch.exp(torch.tensor(avg_val_loss)).item()
+            wandb.log({
+                "val/epoch_loss": avg_val_loss, 
+                "val/perplexity": val_perplexity,
+                "epoch": epoch
+            }, step=global_step)
+            print(f"Epoch {epoch} Validation Loss: {avg_val_loss:.4f} | Validation Perplexity: {val_perplexity:.4f}")
             model.model.train()
         
         # Proper Checkpointing Strategy
