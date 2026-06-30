@@ -29,7 +29,9 @@ model:
 
 training:
   run_split: train # Options: train, overfit
+  resume: false
   epochs: 100 # Probably will need WAY more
+  save_interval_epochs: 1
   learning_rate: 2e-4
   weight_decay: 0.01
   max_grad_norm: 1.0           

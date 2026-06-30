@@ -145,8 +145,35 @@ def run_pretraining(
     
     global_step = 0
     best_loss = float('inf')
+    start_epoch = 1
     
-    for epoch in range(1, epochs + 1):
+    resume = train_config["resume"]
+    checkpoint_path = run_dir / "checkpoint_latest.pt"
+    
+    if resume and checkpoint_path.is_file():
+        print(f"Resuming from checkpoint: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=model.device)
+        model.model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        
+        start_epoch = checkpoint["epoch"] + 1
+        global_step = checkpoint["epoch"] * len(dataloader)
+        
+        best_loss = float('inf')
+        if "best_loss" in checkpoint:
+            best_loss = checkpoint["best_loss"]
+        
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        else:
+            print("Fast-forwarding scheduler to match global step...")
+            for _ in range(global_step):
+                scheduler.step()
+                
+        if "scaler_state_dict" in checkpoint:
+            scaler.load_state_dict(checkpoint["scaler_state_dict"])
+            
+    for epoch in range(start_epoch, epochs + 1):
         epoch_loss = 0.0
         
         for batch in dataloader:
@@ -245,24 +272,35 @@ def run_pretraining(
             print(f"Epoch {epoch} Validation Loss: {avg_val_loss:.4f} | Validation Perplexity: {val_perplexity:.4f}")
             model.model.train()
         
-        # Proper Checkpointing Strategy
-        checkpoint = {
-            "epoch": epoch,
-            "model_state_dict": model.model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "train_loss": avg_epoch_loss,
-            "val_loss": avg_val_loss,
-        }
-        
-        # Always overwrite the latest to protect from crashes without wasting space
-        torch.save(checkpoint, run_dir / "checkpoint_latest.pt")
-        
         # Track and save the best model
         eval_loss = avg_val_loss if avg_val_loss is not None else avg_epoch_loss
         if eval_loss < best_loss:
             best_loss = eval_loss
-            torch.save(checkpoint, run_dir / "checkpoint_best.pt")
-            print(f"New best checkpoint saved with loss: {best_loss:.4f}")
+            is_best = True
+        else:
+            is_best = False
+            
+        save_interval_epochs = train_config["save_interval_epochs"]
+        
+        # Proper Checkpointing Strategy
+        if epoch % save_interval_epochs == 0 or epoch == epochs or is_best:
+            checkpoint = {
+                "epoch": epoch,
+                "model_state_dict": model.model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
+                "train_loss": avg_epoch_loss,
+                "val_loss": avg_val_loss,
+                "best_loss": best_loss,
+            }
+            
+            if epoch % save_interval_epochs == 0 or epoch == epochs:
+                torch.save(checkpoint, run_dir / "checkpoint_latest.pt")
+                
+            if is_best:
+                torch.save(checkpoint, run_dir / "checkpoint_best.pt")
+                print(f"New best checkpoint saved with loss: {best_loss:.4f}")
         
     wandb.finish()
     print("Pretraining completed successfully.")

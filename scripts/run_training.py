@@ -45,9 +45,10 @@ def main():
 
     outputs_root = repository_root / run_config["outputs_root"]
     overwrite = bool(run_config["overwrite"])
+    resume = bool(training_config["resume"])
     run_dir = outputs_root / run_config["run_id"]
 
-    run_dir.mkdir(parents=True, exist_ok=overwrite)
+    run_dir.mkdir(parents=True, exist_ok=overwrite or resume)
 
     from glmfe.datasets.prepared import load_prepared_dataset
 
