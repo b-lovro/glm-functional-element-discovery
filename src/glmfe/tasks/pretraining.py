@@ -105,6 +105,9 @@ def run_pretraining(
         weight_decay=float(train_config["weight_decay"]),
     )
     
+    # GradScaler for Mixed Precision Stability
+    scaler = torch.cuda.amp.GradScaler(enabled=(model.device.type == "cuda"))
+    
     # Scheduler
     total_steps = len(dataloader) * train_config["epochs"]
     warmup_fraction = float(train_config["warmup_fraction"])
@@ -164,7 +167,10 @@ def run_pretraining(
             )
             
             # Backward pass
-            loss.backward()
+            scaler.scale(loss).backward()
+            
+            # Unscale gradients before clipping so the norm is correct
+            scaler.unscale_(optimizer)
             
             # Gradient clipping and norm calculation
             max_grad_norm = train_config["max_grad_norm"]
@@ -181,8 +187,10 @@ def run_pretraining(
                         total_norm += param_norm.item() ** 2
                 total_norm = total_norm ** 0.5
             
-            # Update weights
-            optimizer.step()
+            # Update weights safely with scaler
+            scaler.step(optimizer)
+            scaler.update()
+            
             scheduler.step()
             
             epoch_loss += loss.item()
@@ -218,7 +226,7 @@ def run_pretraining(
                         batch_sequences = batch
                         batch_is_start, batch_is_end = None, None
                     
-                    with torch.amp.autocast(device_type=model.device.type):
+                    with torch.amp.autocast(device_type=model.device.type, dtype=torch.bfloat16):
                         loss = model.compute_pretraining_loss(
                             batch_sequences, 
                             is_start=batch_is_start, 

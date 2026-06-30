@@ -81,7 +81,7 @@ class RiNALMoSequenceModel(BaseSequenceModel):
             tokens[batch_indices, token_positions] = self.alphabet.mask_idx
 
             with torch.no_grad():
-                with torch.amp.autocast(device_type=self.device.type):
+                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     logits = self.model(tokens)["logits"]
             masked_logits = logits[
                 batch_indices,
@@ -156,7 +156,7 @@ class RiNALMoSequenceModel(BaseSequenceModel):
                 device=self.device,
             )
             with torch.inference_mode():
-                with torch.amp.autocast(device_type=self.device.type):
+                with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     logits = self.model(tokens)["logits"]
             nucleotide_logits = logits[:, 1:-1, :][
                 :, :, self.nucleotide_token_indices
@@ -199,6 +199,9 @@ class RiNALMoSequenceModel(BaseSequenceModel):
         )
         self.model = get_peft_model(self.model, peft_config)
         self.model.train()
+        
+        trainable_params = sum(p.numel() for p in self.get_trainable_parameters())
+        print(f"LoRA injected: {trainable_params / 1e6:.2f} M trainable parameters")
 
     def get_trainable_parameters(self) -> filter:
         return filter(lambda p: p.requires_grad, self.model.parameters())
@@ -295,7 +298,7 @@ class RiNALMoSequenceModel(BaseSequenceModel):
         # Only compute loss on masked_indices
         labels[~masked_indices] = -100
         
-        with torch.amp.autocast(device_type=self.device.type):
+        with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
             # logits shape: (Batch, SeqLen, Vocab)
             logits = self.model(tokens)["logits"]
             
