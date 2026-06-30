@@ -105,9 +105,6 @@ def run_pretraining(
         weight_decay=float(train_config["weight_decay"]),
     )
     
-    # GradScaler for Mixed Precision Stability
-    scaler = torch.cuda.amp.GradScaler(enabled=(model.device.type == "cuda"))
-    
     # Scheduler
     total_steps = len(dataloader) * train_config["epochs"]
     warmup_fraction = float(train_config["warmup_fraction"])
@@ -170,9 +167,6 @@ def run_pretraining(
             for _ in range(global_step):
                 scheduler.step()
                 
-        if "scaler_state_dict" in checkpoint:
-            scaler.load_state_dict(checkpoint["scaler_state_dict"])
-            
     for epoch in range(start_epoch, epochs + 1):
         epoch_loss = 0.0
         
@@ -194,10 +188,7 @@ def run_pretraining(
             )
             
             # Backward pass
-            scaler.scale(loss).backward()
-            
-            # Unscale gradients before clipping so the norm is correct
-            scaler.unscale_(optimizer)
+            loss.backward()
             
             # Gradient clipping and norm calculation
             max_grad_norm = train_config["max_grad_norm"]
@@ -214,9 +205,8 @@ def run_pretraining(
                         total_norm += param_norm.item() ** 2
                 total_norm = total_norm ** 0.5
             
-            # Update weights safely with scaler
-            scaler.step(optimizer)
-            scaler.update()
+            # Update weights
+            optimizer.step()
             
             scheduler.step()
             
@@ -289,7 +279,6 @@ def run_pretraining(
                 "model_state_dict": model.model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scheduler_state_dict": scheduler.state_dict(),
-                "scaler_state_dict": scaler.state_dict(),
                 "train_loss": avg_epoch_loss,
                 "val_loss": avg_val_loss,
                 "best_loss": best_loss,
