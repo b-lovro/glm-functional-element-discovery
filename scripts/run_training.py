@@ -72,7 +72,7 @@ def main():
     elif adapter == "evo2":
         from glmfe.seq_models.evo2 import load_evo2_model
 
-        cache_dir = model_config.get("cache_dir")
+        cache_dir = model_config["cache_dir"] if "cache_dir" in model_config else None
         model = load_evo2_model(
             model_name=model_config["model_name"],
             device=model_config["device"],

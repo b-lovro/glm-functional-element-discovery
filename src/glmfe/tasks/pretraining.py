@@ -46,9 +46,9 @@ def run_pretraining(
     train_df = splits[run_split]
     
     if run_split == "train":
-        val_df = splits.get("val")
+        val_df = splits["val"] if "val" in splits else None
     elif run_split == "overfit":
-        val_df = splits.get("overfit")
+        val_df = splits["overfit"] if "overfit" in splits else None
     else:
         val_df = None
     
@@ -128,6 +128,15 @@ def run_pretraining(
     else:
         raise ValueError(f"Unsupported lr_scheduler: {scheduler_type}. Use 'cosine' or 'linear'.")
     
+    # Initialize wandb
+    wandb_config = train_config["logging"]
+    wandb.init(
+        project=wandb_config["wandb_project"],
+        name=config["run_id"],
+        config=config,
+        dir=str(run_dir),
+    )
+    
     epochs = train_config["epochs"]
     log_interval = wandb_config["log_interval"]
     
@@ -138,8 +147,6 @@ def run_pretraining(
     resume = train_config["resume"]
     checkpoint_path = run_dir / "checkpoint_latest.pt"
     
-    checkpoint = None
-    wandb_id = None
     if resume and checkpoint_path.is_file():
         print(f"Resuming from checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=model.device)
@@ -149,6 +156,7 @@ def run_pretraining(
         start_epoch = checkpoint["epoch"] + 1
         global_step = checkpoint["epoch"] * len(dataloader)
         
+        best_loss = float('inf')
         if "best_loss" in checkpoint:
             best_loss = checkpoint["best_loss"]
         
@@ -158,35 +166,6 @@ def run_pretraining(
             print("Fast-forwarding scheduler to match global step...")
             for _ in range(global_step):
                 scheduler.step()
-                
-        wandb_id = checkpoint.get("wandb_id")
-        if wandb_id is None:
-            import os
-            latest_run_path = run_dir / "wandb" / "latest-run"
-            if latest_run_path.exists() or latest_run_path.is_symlink():
-                try:
-                    real_path = os.path.realpath(latest_run_path)
-                    dir_name = os.path.basename(real_path)
-                    if "-" in dir_name:
-                        wandb_id = dir_name.split("-")[-1]
-                        print(f"Inferred wandb_id from latest-run: {wandb_id}")
-                except Exception as e:
-                    print(f"Could not infer wandb_id: {e}")
-
-    # Initialize wandb
-    init_kwargs = {
-        "project": wandb_config["wandb_project"],
-        "name": config["run_id"],
-        "config": config,
-        "dir": str(run_dir),
-    }
-    
-    if resume and checkpoint is not None:
-        init_kwargs["resume"] = "allow"
-        if wandb_id is not None:
-            init_kwargs["id"] = wandb_id
-
-    wandb.init(**init_kwargs)
                 
     for epoch in range(start_epoch, epochs + 1):
         epoch_loss = 0.0
@@ -241,7 +220,7 @@ def run_pretraining(
                     "train/lr": scheduler.get_last_lr()[0],
                     "train/epoch": epoch,
                     "train/global_step": global_step,
-                })
+                }, step=global_step)
                 print(
                     f"Epoch {epoch}/{epochs} | Step {global_step} | "
                     f"Loss: {loss.item():.4f} | Grad Norm: {total_norm:.4f}"
@@ -295,7 +274,7 @@ def run_pretraining(
         
         # Proper Checkpointing Strategy
         if epoch % save_interval_epochs == 0 or epoch == epochs or is_best:
-            checkpoint_dict = {
+            checkpoint = {
                 "epoch": epoch,
                 "model_state_dict": model.model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
@@ -304,14 +283,12 @@ def run_pretraining(
                 "val_loss": avg_val_loss,
                 "best_loss": best_loss,
             }
-            if wandb.run is not None:
-                checkpoint_dict["wandb_id"] = wandb.run.id
             
             if epoch % save_interval_epochs == 0 or epoch == epochs:
-                torch.save(checkpoint_dict, run_dir / "checkpoint_latest.pt")
+                torch.save(checkpoint, run_dir / "checkpoint_latest.pt")
                 
             if is_best:
-                torch.save(checkpoint_dict, run_dir / "checkpoint_best.pt")
+                torch.save(checkpoint, run_dir / "checkpoint_best.pt")
                 print(f"New best checkpoint saved with loss: {best_loss:.4f}")
         
     wandb.finish()
