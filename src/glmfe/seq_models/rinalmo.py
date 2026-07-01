@@ -317,6 +317,7 @@ def load_rinalmo_model(
     model_size: str,
     weights_path: Path,
     device: str,
+    lora_weights_path: Path | None = None,
 ) -> RiNALMoSequenceModel:
     if not weights_path.is_file():
         raise FileNotFoundError(f"Missing RiNALMo weights: {weights_path}")
@@ -332,6 +333,53 @@ def load_rinalmo_model(
     if not isinstance(state_dict, dict):
         raise TypeError("RiNALMo checkpoint must contain a direct state dictionary")
     model.load_state_dict(state_dict)
+    
+    if lora_weights_path is not None:
+        if not lora_weights_path.is_file():
+            raise FileNotFoundError(f"Missing LoRA weights: {lora_weights_path}")
+            
+        import json
+        run_dir = lora_weights_path.parent
+        manifest_path = run_dir / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"Missing manifest.json for LoRA weights in {run_dir}")
+            
+        with manifest_path.open() as f:
+            manifest = json.load(f)
+            
+        if "training" not in manifest or "lora" not in manifest["training"]:
+            raise ValueError(f"LoRA config not found in manifest at {manifest_path}")
+            
+        lora_config = manifest["training"]["lora"]
+        
+        import torch.nn as nn
+        from peft import LoraConfig, get_peft_model
+        
+        target_modules = lora_config["target_modules"]
+        if target_modules == "all-linear" or target_modules == ["all-linear"]:
+            target_modules = set()
+            for name, module in model.named_modules():
+                if isinstance(module, nn.Linear):
+                    target_modules.add(name)
+            target_modules = list(target_modules)
+            
+        peft_config = LoraConfig(
+            r=lora_config["r"],
+            lora_alpha=lora_config["alpha"],
+            target_modules=target_modules,
+            lora_dropout=lora_config["dropout"],
+            bias="none",
+        )
+        
+        model = get_peft_model(model, peft_config)
+        
+        lora_checkpoint = torch.load(lora_weights_path, map_location="cpu")
+        if "model_state_dict" not in lora_checkpoint:
+            raise ValueError(f"LoRA checkpoint {lora_weights_path} missing 'model_state_dict'")
+            
+        model.load_state_dict(lora_checkpoint["model_state_dict"])
+        model = model.merge_and_unload()
+
     model = model.to(torch_device)
     model.eval()
     return RiNALMoSequenceModel(

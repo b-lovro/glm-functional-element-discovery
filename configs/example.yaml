@@ -13,6 +13,7 @@ run_tasks:
 dataset:
   # Stored in manifests and result tables.
   dataset_id: ribosome
+  # ribosome_test
   # Must contain records.parquet and regions.parquet.
   prepared_dir: data/prepared/ribosome
 
@@ -33,6 +34,7 @@ model:
     # Checkpoint path relative to the repository root.
     weights: models/rinalmo/rinalmo_micro_pretrained.pt
     # PyTorch inference device. CUDA must be available for cuda:0.
+    #lora_weights: outputs/runs/your-run-id/checkpoint_latest.pt
     device: cuda:0
 
   evo2:

@@ -74,6 +74,23 @@ def main():
         prepared_dir = repository_root / dataset["prepared_dir"]
         records, regions = load_prepared_dataset(prepared_dir)
 
+        if dataset["dataset_id"] == "rinalmo_test":
+            split_files = list(prepared_dir.glob("splits_seed*.json"))
+            if not split_files:
+                raise FileNotFoundError(f"No splits_seed*.json file found in {prepared_dir}")
+            
+            split_file = split_files[0]
+            with split_file.open() as handle:
+                splits = json.load(handle)
+                
+            if "test" not in splits:
+                raise ValueError(f"'test' split missing from {split_file}")
+                
+            test_indices = splits["test"]
+            records = records.iloc[test_indices].copy()
+            valid_record_ids = set(records["record_id"])
+            regions = regions[regions["record_id"].isin(valid_record_ids)].copy()
+
         # Construct the model adapter.
         adapter = run_config["model"]["adapter"]
         weights_path = None
@@ -85,11 +102,12 @@ def main():
                 model_size=model_config["size"],
                 weights_path=repository_root / model_config["weights"],
                 device=model_config["device"],
+                lora_weights_path=repository_root / model_config["lora_weights"] if "lora_weights" in model_config else None,
             )
         elif adapter == "evo2":
             from glmfe.seq_models.evo2 import load_evo2_model
 
-            cache_dir = model_config.get("cache_dir")
+            cache_dir = model_config["cache_dir"] if "cache_dir" in model_config else None
             model = load_evo2_model(
                 model_name=model_config["model_name"],
                 device=model_config["device"],
