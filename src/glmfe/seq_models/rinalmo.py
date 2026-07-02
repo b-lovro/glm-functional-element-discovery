@@ -29,6 +29,11 @@ class RiNALMoSequenceModel(BaseSequenceModel):
             dtype=torch.int64,
             device=device,
         )
+        self.canonical_nucleotide_token_indices = torch.tensor(
+            [alphabet.tkn_to_idx[base] for base in "ACGT" if base in alphabet.tkn_to_idx],
+            dtype=torch.int64,
+            device=device,
+        )
         self.random_replace_indices = torch.tensor(
             [alphabet.tkn_to_idx[base] for base in "ACGTN" if base in alphabet.tkn_to_idx],
             dtype=torch.int64,
@@ -86,7 +91,7 @@ class RiNALMoSequenceModel(BaseSequenceModel):
             masked_logits = logits[
                 batch_indices,
                 token_positions,
-            ][:, self.nucleotide_token_indices]
+            ][:, self.canonical_nucleotide_token_indices]
             batch_probabilities = torch.softmax(
                 masked_logits.float(),
                 dim=-1,
@@ -159,7 +164,7 @@ class RiNALMoSequenceModel(BaseSequenceModel):
                 with torch.amp.autocast(device_type=self.device.type, dtype=torch.bfloat16):
                     logits = self.model(tokens)["logits"]
             nucleotide_logits = logits[:, 1:-1, :][
-                :, :, self.nucleotide_token_indices
+                :, :, self.canonical_nucleotide_token_indices
             ]
             output_logits.append(
                 nucleotide_logits.float().cpu().numpy()
