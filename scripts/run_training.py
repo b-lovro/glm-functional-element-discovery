@@ -78,6 +78,15 @@ def main():
             device=model_config["device"],
             cache_dir=repository_root / cache_dir if cache_dir else None,
         )
+    elif adapter == "mock_rinalmo":
+        # CPU stand-in for local development; see mock_rinalmo.py.
+        from glmfe.seq_models.mock_rinalmo import load_mock_rinalmo_model
+
+        model = load_mock_rinalmo_model(
+            model_size=model_config["size"],
+            device=model_config["device"] if "device" in model_config else "cpu",
+            seed=model_config["seed"] if "seed" in model_config else 0,
+        )
     else:
         raise ValueError(f"Unsupported model adapter for training: {adapter}")
 

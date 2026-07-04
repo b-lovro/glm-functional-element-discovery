@@ -1,12 +1,16 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 import numpy as np
 import torch
-from rinalmo.config import model_config
-from rinalmo.data.alphabet import Alphabet
-from rinalmo.model.model import RiNALMo
 
 from glmfe.seq_models.base import BaseSequenceModel
+
+# NOTE: The `rinalmo` package (and its flash-attn / CUDA dependencies) is only
+# imported inside `load_rinalmo_model`. This keeps `RiNALMoSequenceModel`
+# importable on machines without the heavy RiNALMo install (e.g. for the CPU
+# mock in `mock_rinalmo.py`), which reuses this adapter's logic.
 
 
 class RiNALMoSequenceModel(BaseSequenceModel):
@@ -324,6 +328,10 @@ def load_rinalmo_model(
     device: str,
     lora_weights_path: Path | None = None,
 ) -> RiNALMoSequenceModel:
+    from rinalmo.config import model_config
+    from rinalmo.data.alphabet import Alphabet
+    from rinalmo.model.model import RiNALMo
+
     if not weights_path.is_file():
         raise FileNotFoundError(f"Missing RiNALMo weights: {weights_path}")
 

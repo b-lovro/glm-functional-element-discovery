@@ -1,0 +1,27 @@
+# Local-development smoke test using the CPU mock RiNALMo adapter.
+# Outputs are meaningless (random-init model); this only checks that the
+# evaluation code path runs end-to-end on a laptop before pushing to the cluster.
+run_id: mock_rinalmo_reco_test
+overwrite: true
+
+run_tasks:
+  - reconstruction
+
+dataset:
+  dataset_id: ribosome
+  prepared_dir: data/prepared/ribosome
+
+model:
+  adapter: mock_rinalmo
+
+  mock_rinalmo:
+    size: micro
+    device: cpu
+    seed: 0
+
+reconstruction:
+  context_length: 200
+  batch_size: 8
+  plot_results: false
+
+outputs_root: outputs/runs
