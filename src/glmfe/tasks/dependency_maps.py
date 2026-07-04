@@ -102,6 +102,7 @@ def _infer_parent_region(
     candidate_parents = candidate_parents.sort_values(
         ["_parent_length", "start", "end", "region_id"],
         kind="stable",
+        ascending=False,
     )
     return candidate_parents.iloc[0]
 
