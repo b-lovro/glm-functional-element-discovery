@@ -47,18 +47,18 @@ model:
 
 reconstruction:
   # Context around each masked target; it must fit the model context limit.
-  context_length: 512
+  context_length: 1022
   # Number of target contexts passed through the model per batch.
   batch_size: 8
   # Write summary plots from the per-region reconstruction results.
   plot_results: true
 
 dependency_maps:
-  # Context around each configured region; it must fit the model context limit.
-  # If left empty, it will use the region length only.
-  context_length: 512
+  # Context around each configured map interval; it must fit the model limit.
+  # If omitted, dependency maps use only the configured interval.
+  context_length: 1022
   # Selects either the manual or region block below. The other block is ignored.
-  mode: manual
+  mode: region
   # Controls batching in dependency-map model forward calls.
   batch_size: 8
   # false substitutes query bases; true masks query positions.
@@ -77,7 +77,7 @@ dependency_maps:
 
   region:
     # Exact match against the prepared label or feature_type column.
-    label: 18S_rRNA
+    label: TTF1
     # Use "all" for every matching record, or a non-empty explicit list.
     # record_ids: all
     record_ids:
@@ -90,6 +90,14 @@ dependency_maps:
     tile_length: 512
     # Distance between regular tile starts; smaller values increase overlap.
     tile_stride: 384
+    # Optional matched-background dependency maps. Disabled by default.
+    # When enabled, each selected annotated region gets n_per_region
+    # same-length background maps sampled inside its strict parent annotation.
+    background:
+      enabled: true
+      n_per_region: 5
+      min_distance_bp: 5
+      seed: 42
 
 block_scores:
   # Width of the consecutive diagonal dependency block in nucleotides.
