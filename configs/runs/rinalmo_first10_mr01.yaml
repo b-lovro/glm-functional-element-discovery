@@ -1,9 +1,10 @@
 run_id: rinalmo-first10-mr01
-overwrite: false
+overwrite: true
 
 run_tasks:
-  - reconstruction
-  - dependency_maps
+  # - reconstruction
+  # - dependency_maps
+  - block_scores
 
 dataset:
   dataset_id: ribosome
@@ -50,5 +51,13 @@ dependency_maps:
     long_region_policy: tile
     tile_length: 512
     tile_stride: 384
+
+block_scores:
+  # Width of the consecutive diagonal dependency block in nucleotides.
+  block_size: 6
+  # First quartile of off-diagonal directed dependencies within each block.
+  quantile: 0.25
+  # Write descriptive summary and per-map companion plots.
+  plot_results: true
 
 outputs_root: outputs/runs

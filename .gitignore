@@ -42,6 +42,7 @@ runs/
 !configs/runs/*.yaml
 wandb/
 logs/
+jobs/
 
 # OS/editor junk
 .DS_Store

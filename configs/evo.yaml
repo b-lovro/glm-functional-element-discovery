@@ -1,0 +1,24 @@
+run_id: evo-first10
+
+run_tasks:
+  - reconstruction
+
+overwrite: true
+
+dataset:
+  dataset_id: ribosome
+  prepared_dir: data/prepared/ribosome
+
+model:
+  adapter: evo
+
+  evo:
+    model_name: evo-1-8k-base
+    device: cuda:0
+
+reconstruction:
+  context_length: 32
+  batch_size: 1
+  plot_results: true
+
+outputs_root: outputs/runs

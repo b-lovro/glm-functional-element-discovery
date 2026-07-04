@@ -1,0 +1,48 @@
+run_id: pretraining_rinalmo_depmap_ctcf
+overwrite: true
+
+run_tasks:
+  #- reconstruction
+  - dependency_maps
+  - block_scores
+
+dataset:
+  dataset_id: ribosome
+  prepared_dir: data/prepared/ribosome
+
+model:
+  adapter: rinalmo
+
+  rinalmo:
+    size: mega
+    weights: models/rinalmo/rinalmo_mega_pretrained.pt
+    lora_weights: outputs/runs/pretraining-rinalmo-bf16-lr-r-long/checkpoint_latest.pt
+    device: cuda:0
+
+#reconstruction:
+#  context_length: 1000
+#  batch_size: 8
+#  plot_results: true
+
+dependency_maps:
+   mode: region
+   batch_size: 8
+   dependency_by_masking: false
+   with_reconstruction: true
+
+   region:
+     label: CTCF
+     record_ids: all
+     long_region_policy: tile
+     tile_length: 512
+     tile_stride: 384
+
+block_scores:
+  # Width of the consecutive diagonal dependency block in nucleotides.
+  block_size: 6
+  # First quartile of off-diagonal directed dependencies within each block.
+  quantile: 0.25
+  # Write descriptive summary and per-map companion plots.
+  plot_results: true
+
+outputs_root: outputs/runs
