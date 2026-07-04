@@ -152,9 +152,56 @@ def plot_reconstruction_results(
         "Mean true-base probability by feature type",
         "mean_true_base_probability_by_feature_type",
         (0.0, 1.0),
-        0.25,
         rng,
     )
+
+
+def _plot_role_distributions(
+    spans_with_roles: pd.DataFrame,
+    output_dir: Path,
+    filename_stem: str,
+    title: str,
+) -> None:
+    roles = ["positive", "background"]
+    values = []
+    labels = []
+
+    for role in roles:
+        role_spans = spans_with_roles[spans_with_roles["map_role"] == role]
+        if not role_spans.empty:
+            scores = role_spans["block_score"].dropna().to_numpy(dtype=float)
+            if len(scores) > 0:
+                values.append(scores)
+                labels.append(f"{role.capitalize()}\n(n={len(scores)})")
+
+    if not values:
+        return
+
+    figure, axis = plt.subplots(figsize=(8, 6))
+    axis.boxplot(
+        values,
+        positions=range(1, len(values) + 1),
+        widths=0.55,
+        patch_artist=True,
+        showfliers=False,
+        medianprops={"color": "black", "linewidth": 2.2},
+        boxprops={
+            "facecolor": "#A6C8E0",
+            "edgecolor": "#1F4E79",
+            "linewidth": 1.8,
+            "alpha": 0.85,
+        },
+        whiskerprops={"color": "#1F4E79", "linewidth": 1.5},
+        capprops={"color": "#1F4E79", "linewidth": 1.5},
+        zorder=2,
+    )
+    axis.set_xticks(range(1, len(labels) + 1))
+    axis.set_xticklabels(labels)
+    axis.set_ylabel("Block score")
+    axis.set_title(title)
+    figure.tight_layout()
+    figure.savefig(output_dir / f"{filename_stem}.png", dpi=300)
+    plt.close(figure)
 
 
 def _plot_block_score_track(
@@ -332,3 +379,28 @@ def plot_block_score_results(
             output_dir,
             plot_dir,
         )
+
+    dist_dir = output_dir / "block_scores" / "distributions"
+    dist_dir.mkdir(parents=True, exist_ok=True)
+
+    if "map_role" in map_index.columns:
+        spans_with_roles = per_span.merge(
+            map_index[["map_id", "map_role"]],
+            on="map_id",
+            how="left"
+        )
+        
+        _plot_role_distributions(
+            spans_with_roles,
+            dist_dir,
+            "overall_distributions",
+            "Overall block score distribution",
+        )
+        
+        for record_id, group in spans_with_roles.groupby("record_id"):
+            _plot_role_distributions(
+                group,
+                dist_dir,
+                f"{record_id}_distributions",
+                f"{record_id} block score distribution",
+            )
