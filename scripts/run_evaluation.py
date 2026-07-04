@@ -91,6 +91,20 @@ def main():
             valid_record_ids = set(records["record_id"])
             regions = regions[regions["record_id"].isin(valid_record_ids)].copy()
 
+        #records = records.iloc[:5]
+        #start_record = dataset.get("start_record", 0)
+        #end_record = dataset.get("end_record")
+        #if end_record is not None:
+        #    records = records.iloc[start_record:end_record]
+        #    selected_record_ids = set(records["record_id"])
+        #    regions = regions[
+        #        regions["record_id"].isin(selected_record_ids)
+        #    ]
+        #print(
+        #    f"Evaluating {len(records)} records "
+        #    f"({start_record}:{end_record if end_record is not None else 'end'})"
+        #)
+
         # Construct the model adapter.
         adapter = run_config["model"]["adapter"]
         weights_path = None
@@ -112,6 +126,12 @@ def main():
                 model_name=model_config["model_name"],
                 device=model_config["device"],
                 cache_dir=repository_root / cache_dir if cache_dir else None,
+            )
+        elif adapter == "evo":
+            from glmfe.seq_models.evo import load_evo_model
+            model = load_evo_model(
+                model_name=model_config["model_name"],
+                device=model_config["device"],
             )
         elif adapter == "random":
             from glmfe.seq_models.random import RandomSequenceModel
