@@ -78,8 +78,8 @@ dependency_maps:
   region:
     # Exact match against the prepared label or feature_type column.
     label: TTF1
-    # Use "all" for every matching record, or a non-empty explicit list.
-    record_ids: all
+    # Use "all", "half", or a non-empty explicit list of record IDs.
+    record_ids: half
     # record_ids:
     #   - Mammalia-Artiodactyla-Addax nasomaculatus-GCA_044231825-morph3
       # - Mammalia-Artiodactyla-Bos indicus-GCF_029378745-morph1

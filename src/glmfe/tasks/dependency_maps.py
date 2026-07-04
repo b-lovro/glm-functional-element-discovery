@@ -306,6 +306,13 @@ def run_dependency_maps(
             (regions["label"] == label)
             | (regions["feature_type"] == label)
         ]
+        if configured_record_ids == "half":
+            configured_record_ids = (
+                selected_regions["record_id"]
+                .drop_duplicates()
+                .iloc[: max(1, selected_regions["record_id"].nunique() // 2)]
+                .tolist()
+            )
         if configured_record_ids != "all":
             selected_regions = selected_regions.loc[
                 selected_regions["record_id"].isin(configured_record_ids)
