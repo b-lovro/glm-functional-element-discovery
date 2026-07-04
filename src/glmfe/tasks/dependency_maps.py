@@ -145,8 +145,6 @@ def sample_background_starts(
         annotation_start, annotation_end = _region_interval(annotation)
         if _region_id(annotation) == parent_region_id:
             continue
-        if annotation_start < parent_start or annotation_end > parent_end:
-            continue
         annotation_intervals.append((annotation_start, annotation_end))
 
     valid_starts = []
