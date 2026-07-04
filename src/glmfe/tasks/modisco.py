@@ -14,12 +14,14 @@ We call the modisco-lite **command line** interface (``modisco motifs`` /
 version-stable surface and consumes plain ``.npy`` arrays in ``(N, 4, L)``
 layout (the CLI transposes to ``(N, L, 4)`` internally).
 
-IMPORTANT — attribution source is an open design choice.
-TF-MoDISco needs per-base *contribution* scores, but a masked-reconstruction /
-dependency genomic LM does not emit those directly. The conversion lives behind
-a single hook, :func:`compute_attributions`, with a clearly-labelled placeholder
-default (deviation-from-uniform of the masked-reconstruction distribution). Swap
-that implementation once the score definition is settled.
+Attribution scores are derived in one hook, :func:`compute_attributions`. The
+default ``reconstruction_ic`` treats the model's masked A/C/G/T marginal as a
+soft in-silico-mutagenesis estimate, centres it, and weights it by information
+content — chosen because TF-MoDISco builds motifs (CWMs) directly from the
+per-base vector and localises seqlets from the present base's score, so the LM's
+masked marginal maps naturally onto what the algorithm expects. A simpler
+``reconstruction_uniform`` (``p - 0.25``) is kept for comparison. See the hook's
+docstring for the exact TF-MoDISco mechanics this mirrors.
 """
 
 from __future__ import annotations
@@ -68,38 +70,82 @@ def _one_hot(sequence: str) -> np.ndarray:
     return one_hot
 
 
+# Attribution methods understood by :func:`compute_attributions`.
+_ATTRIBUTION_METHODS = ("reconstruction_ic", "reconstruction_uniform")
+_LOG2_EPS = 1e-12
+
+
+def _masked_marginals(
+    model: BaseSequenceModel,
+    window: str,
+    batch_size: int,
+) -> np.ndarray:
+    """Return the model's masked A/C/G/T marginal at every position, shape (L, 4).
+
+    Masks each position of the (equal-length) window in turn and reads the
+    reconstruction distribution. This is a soft in-silico-mutagenesis estimate:
+    ``p_i(b)`` approximates the effect of placing base ``b`` at position ``i``.
+    """
+    window_length = len(window)
+    return model.predict_masked_base_probabilities(
+        [window] * window_length,
+        list(range(window_length)),
+        batch_size,
+    ).astype(np.float32)  # (L, 4) in A/C/G/T order
+
+
 def compute_attributions(
     model: BaseSequenceModel,
     windows: list[str],
     batch_size: int,
-    method: str = "reconstruction",
+    method: str = "reconstruction_ic",
 ) -> np.ndarray:
-    """ATTRIBUTION HOOK — turn model outputs into a (N, 4, L) contribution track.
+    """ATTRIBUTION HOOK — turn model outputs into a (N, 4, L) *hypothetical* track.
 
-    The exact score definition is intentionally not fixed yet. The default
-    ``"reconstruction"`` method is a documented placeholder: for each position it
-    masks that base, reads the model's A/C/G/T distribution, and uses the
-    deviation from the uniform 0.25 baseline as the per-base contribution.
-    Positions that are not canonical A/C/G/T contribute zero.
+    TF-MoDISco (see ``modiscolite/tfmodisco.py``) consumes this as
+    ``hypothetical_contribs``: it forms the actual contribution
+    ``one_hot * hypothetical``, localises seqlets from that summed over bases
+    (so only the *present* base's score localises motifs), auto-calibrates a
+    Laplacian null over the score distribution, and builds each motif's CWM from
+    the per-base vector. The two implications: background positions should score
+    ~0, and the per-position 4-vector should look like a PWM column.
+
+    Methods (config ``modisco.attribution_method``):
+
+    - ``reconstruction_ic`` (default, recommended): mask each position, read the
+      A/C/G/T marginal ``p_i``, centre it (``p_i - mean_b p_i`` so background
+      ~0 and the vector sums to zero), and scale by information content
+      ``IC_i = 2 - H(p_i)`` (bits) so confident/conserved positions dominate and
+      uncertain ones collapse toward zero. The present base scores high exactly
+      when the model confidently predicts the actual base, i.e. constraint.
+    - ``reconstruction_uniform``: the simpler ``p_i - 0.25`` deviation-from-
+      uniform baseline, kept for comparison.
+
+    Positions that are not canonical A/C/G/T (e.g. 'N' padding) contribute zero.
     """
-    if method != "reconstruction":
+    if method not in _ATTRIBUTION_METHODS:
         raise ValueError(
             f"Unknown attribution method {method!r}; "
-            "only 'reconstruction' is implemented (this is the hook to extend)."
+            f"expected one of {_ATTRIBUTION_METHODS}."
         )
 
     attributions = np.zeros((len(windows), 4, len(windows[0])), dtype=np.float32)
     for window_index, window in enumerate(
         tqdm(windows, desc="MoDISco attributions", unit="window")
     ):
-        window_length = len(window)
-        # Mask every position of this (equal-length) window in one call.
-        probabilities = model.predict_masked_base_probabilities(
-            [window] * window_length,
-            list(range(window_length)),
-            batch_size,
-        )  # (L, 4) in A/C/G/T order
-        track = (probabilities - 0.25).astype(np.float32).T  # (4, L)
+        probabilities = _masked_marginals(model, window, batch_size)  # (L, 4)
+
+        if method == "reconstruction_uniform":
+            hypothetical = probabilities - 0.25  # (L, 4)
+        else:  # reconstruction_ic
+            centered = probabilities - probabilities.mean(axis=1, keepdims=True)
+            entropy = -np.sum(
+                probabilities * np.log2(probabilities + _LOG2_EPS), axis=1
+            )  # (L,), bits in [0, 2]
+            information_content = np.maximum(0.0, 2.0 - entropy)  # (L,)
+            hypothetical = information_content[:, None] * centered  # (L, 4)
+
+        track = hypothetical.astype(np.float32).T  # (4, L)
         # Zero out padded / non-ACGT positions so they cannot seed motifs.
         canonical = np.array([base in _BASE_TO_INDEX for base in window])
         track[:, ~canonical] = 0.0
@@ -155,7 +201,7 @@ def build_modisco_inputs(
         model,
         windows,
         batch_size,
-        method=config["attribution_method"] if "attribution_method" in config else "reconstruction",
+        method=config["attribution_method"] if "attribution_method" in config else "reconstruction_ic",
     )
     window_index = pd.DataFrame(index_rows)
     return one_hot, attributions, window_index

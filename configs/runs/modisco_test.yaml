@@ -28,8 +28,11 @@ modisco:
   window_length: 400
   # Batch size for the per-position masked-reconstruction attribution passes.
   batch_size: 64
-  # Attribution source hook (see tasks/modisco.py::compute_attributions).
-  attribution_method: reconstruction
+  # Attribution source hook (see tasks/modisco.py::compute_attributions):
+  #   reconstruction_ic      centred, information-content-weighted masked
+  #                          marginal (recommended default)
+  #   reconstruction_uniform simpler p - 0.25 baseline, for comparison
+  attribution_method: reconstruction_ic
   # `modisco motifs -n`: max seqlets per metacluster.
   max_seqlets_per_metacluster: 2000
   # Generate the HTML report after motif discovery.
