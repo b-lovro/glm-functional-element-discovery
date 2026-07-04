@@ -26,6 +26,9 @@ _MAP_INDEX_COLUMNS = [
     "dataset_id",
     "model_id",
     "map_id",
+    "comparison_id",
+    "map_role",
+    "background_index",
     "record_id",
     "region_id",
     "label",
@@ -50,6 +53,133 @@ _MAP_INDEX_COLUMNS = [
 ]
 
 
+def _region_value(region: object, field: str) -> object:
+    if isinstance(region, pd.Series):
+        return region[field]
+    return getattr(region, field)
+
+
+def _region_interval(region: object) -> tuple[int, int]:
+    return int(_region_value(region, "start")), int(
+        _region_value(region, "end")
+    )
+
+
+def _region_id(region: object) -> str:
+    return str(_region_value(region, "region_id"))
+
+
+def _infer_parent_region(
+    target_region: object,
+    record_regions: pd.DataFrame,
+) -> pd.Series:
+    target_record_id = str(_region_value(target_region, "record_id"))
+    target_start, target_end = _region_interval(target_region)
+    target_length = target_end - target_start
+    target_region_id = _region_id(target_region)
+    same_record_regions = record_regions.loc[
+        record_regions["record_id"] == target_record_id
+    ]
+
+    candidate_parents = same_record_regions.loc[
+        (same_record_regions["start"] <= target_start)
+        & (same_record_regions["end"] >= target_end)
+        & (
+            (same_record_regions["end"] - same_record_regions["start"])
+            > target_length
+        )
+    ].copy()
+    if candidate_parents.empty:
+        raise ValueError(
+            f"Background sampling for target region {target_region_id} "
+            f"on record {target_record_id} requires a strict parent "
+            "annotation"
+        )
+
+    candidate_parents["_parent_length"] = (
+        candidate_parents["end"] - candidate_parents["start"]
+    )
+    candidate_parents = candidate_parents.sort_values(
+        ["_parent_length", "start", "end", "region_id"],
+        kind="stable",
+    )
+    return candidate_parents.iloc[0]
+
+
+def _intervals_overlap(
+    start_a: int,
+    end_a: int,
+    start_b: int,
+    end_b: int,
+) -> bool:
+    return start_a < end_b and start_b < end_a
+
+
+def sample_background_starts(
+    target_region: object,
+    record_regions: pd.DataFrame,
+    n_per_region: int,
+    min_distance_bp: int,
+    rng: np.random.Generator,
+) -> list[int]:
+    """Sample simple same-parent background starts for one target region.
+
+    The first sampler only uses annotation coordinates: it samples fixed-length
+    windows inside the smallest strict parent while keeping a configurable
+    buffer away from annotations inside that parent.
+    """
+
+    parent_region = _infer_parent_region(target_region, record_regions)
+    parent_start, parent_end = _region_interval(parent_region)
+    target_start, target_end = _region_interval(target_region)
+    target_length = target_end - target_start
+    parent_region_id = _region_id(parent_region)
+    target_record_id = str(_region_value(target_region, "record_id"))
+    same_record_regions = record_regions.loc[
+        record_regions["record_id"] == target_record_id
+    ]
+
+    annotation_intervals = []
+    for annotation in same_record_regions.itertuples(index=False):
+        annotation_start, annotation_end = _region_interval(annotation)
+        if _region_id(annotation) == parent_region_id:
+            continue
+        if annotation_start < parent_start or annotation_end > parent_end:
+            continue
+        annotation_intervals.append((annotation_start, annotation_end))
+
+    valid_starts = []
+    for start in range(parent_start, parent_end - target_length + 1):
+        buffered_start = start - min_distance_bp
+        buffered_end = start + target_length + min_distance_bp
+        overlaps_annotation = any(
+            _intervals_overlap(
+                buffered_start,
+                buffered_end,
+                annotation_start,
+                annotation_end,
+            )
+            for annotation_start, annotation_end in annotation_intervals
+        )
+        if not overlaps_annotation:
+            valid_starts.append(start)
+
+    if len(valid_starts) < n_per_region:
+        raise ValueError(
+            f"Background sampling for target region {_region_id(target_region)} "
+            f"on record {target_record_id} found "
+            f"{len(valid_starts)} valid candidate start(s), but "
+            f"n_per_region={n_per_region}"
+        )
+
+    sampled = rng.choice(
+        valid_starts,
+        size=n_per_region,
+        replace=False,
+    )
+    return [int(start) for start in sampled.tolist()]
+
+
 def run_dependency_maps(
     records: pd.DataFrame,
     regions: pd.DataFrame,
@@ -67,7 +197,14 @@ def run_dependency_maps(
     batch_size = int(dependency_config["batch_size"])
     dependency_by_masking = bool(dependency_config["dependency_by_masking"])
     with_reconstruction = bool(dependency_config["with_reconstruction"])
-
+    configured_context_length = dependency_config.get("context_length")
+    context_length = (
+        None
+        if configured_context_length is None
+        else int(configured_context_length)
+    )
+    if context_length is not None and context_length < 1:
+        raise ValueError("dependency_maps.context_length must be at least 1")
     # Build manual or region jobs from the configuration.
     jobs = []
     if mode == "manual":
@@ -94,6 +231,9 @@ def run_dependency_maps(
                     "long_region_policy": None,
                     "start": start,
                     "end": end,
+                    "comparison_id": None,
+                    "map_role": None,
+                    "background_index": None,
                 }
             )
     elif mode == "region":
@@ -101,6 +241,51 @@ def run_dependency_maps(
         label = region_config["label"]
         configured_record_ids = region_config["record_ids"]
         long_region_policy = str(region_config["long_region_policy"])
+        background_config = region_config.get("background", {})
+        if background_config is None:
+            background_config = {}
+        if not isinstance(background_config, dict):
+            raise ValueError(
+                "dependency_maps.region.background must be a mapping"
+            )
+        background_enabled = bool(background_config.get("enabled", False))
+        if background_enabled:
+            required_keys = ["n_per_region", "min_distance_bp", "seed"]
+            missing_keys = [
+                key for key in required_keys if key not in background_config
+            ]
+            if missing_keys:
+                raise ValueError(
+                    "dependency_maps.region.background is enabled but "
+                    "missing required key(s): "
+                    + ", ".join(missing_keys)
+                )
+
+            n_backgrounds_per_region = int(
+                background_config["n_per_region"]
+            )
+            background_min_distance_bp = int(
+                background_config["min_distance_bp"]
+            )
+            background_seed = int(background_config["seed"])
+            if n_backgrounds_per_region < 1:
+                raise ValueError(
+                    "dependency_maps.region.background.n_per_region must "
+                    "be at least 1"
+                )
+            if background_min_distance_bp < 0:
+                raise ValueError(
+                    "dependency_maps.region.background.min_distance_bp "
+                    "must be non-negative"
+                )
+            if background_seed < 0:
+                raise ValueError(
+                    "dependency_maps.region.background.seed must be "
+                    "non-negative"
+                )
+            background_rng = np.random.default_rng(background_seed)
+        else:
+            background_rng = None
         if long_region_policy not in {"error", "tile"}:
             raise ValueError(
                 "dependency_maps.region.long_region_policy must be "
@@ -135,6 +320,17 @@ def run_dependency_maps(
             region_length = region_end - region_start
             record_id = str(region.record_id)
             region_id = str(region.region_id)
+            comparison_id = f"{record_id}__{region_id}"
+            if background_enabled:
+                if region_length > model.max_context_length:
+                    raise ValueError(
+                        f"Background dependency maps for region {region_id} "
+                        f"on record {record_id} require the target length "
+                        f"{region_length} to be at most model context "
+                        f"length {model.max_context_length}; tiled "
+                        "background maps are not supported yet"
+                    )
+
             if region_length <= model.max_context_length:
                 tile_intervals = [(region_start, region_end)]
             elif long_region_policy == "error":
@@ -165,13 +361,14 @@ def run_dependency_maps(
             for tile_index, (tile_start, tile_end) in enumerate(
                 tile_intervals
             ):
+                positive_map_id = (
+                    f"{record_id}__{region_id}__"
+                    f"tile_{tile_index:03d}__"
+                    f"{tile_start}_{tile_end}"
+                )
                 jobs.append(
                     {
-                        "map_id": (
-                            f"{record_id}__{region_id}__"
-                            f"tile_{tile_index:03d}__"
-                            f"{tile_start}_{tile_end}"
-                        ),
+                        "map_id": positive_map_id,
                         "record_id": record_id,
                         "region_id": region_id,
                         "label": region.label,
@@ -186,8 +383,51 @@ def run_dependency_maps(
                         "long_region_policy": long_region_policy,
                         "start": tile_start,
                         "end": tile_end,
+                        "comparison_id": comparison_id,
+                        "map_role": "positive",
+                        "background_index": None,
                     }
                 )
+                if background_enabled:
+                    record_regions = regions.loc[
+                        regions["record_id"] == record_id
+                    ]
+                    background_starts = sample_background_starts(
+                        region,
+                        record_regions,
+                        n_backgrounds_per_region,
+                        background_min_distance_bp,
+                        background_rng,
+                    )
+                    for background_index, background_start in enumerate(
+                        background_starts
+                    ):
+                        background_end = background_start + region_length
+                        jobs.append(
+                            {
+                                "map_id": (
+                                    f"{positive_map_id}__background_"
+                                    f"{background_index:03d}"
+                                ),
+                                "record_id": record_id,
+                                "region_id": region_id,
+                                "label": region.label,
+                                "feature_type": region.feature_type,
+                                "region_start": region_start,
+                                "region_end": region_end,
+                                "region_length": region_length,
+                                "tile_index": None,
+                                "tile_start": None,
+                                "tile_end": None,
+                                "tile_length": None,
+                                "long_region_policy": long_region_policy,
+                                "start": background_start,
+                                "end": background_end,
+                                "comparison_id": comparison_id,
+                                "map_role": "background",
+                                "background_index": background_index,
+                            }
+                        )
     else:
         raise ValueError(
             f"Unsupported dependency_maps mode: {mode}; "
@@ -250,35 +490,29 @@ def run_dependency_maps(
                 f"[{start}, {end}) for sequence length {sequence_length}"
             )
 
-        context_length = dependency_config.get("context_length")
-
-        subset = (start, end)
-        if context_length is not None:
-            target_len = subset[1] - subset[0]
-            w_size = max(context_length, target_len)
-            pad_total = w_size - target_len
-            pad_left = pad_total // 2
-            
-            window_start = max(0, subset[0] - pad_left)
-            window_end = min(sequence_length, window_start + w_size)
-            
-            # Adjust if window_end hit the limit and we can shift left
-            actual_w_size = window_end - window_start
-            if actual_w_size < w_size and window_start > 0:
-                window_start = max(0, window_end - w_size)
-                
-            active_seq = sequence[window_start:window_end]
-            active_subset = (subset[0] - window_start, subset[1] - window_start)
-        else:
+        target_length = end - start
+        if context_length is None:
             window_start = start
             window_end = end
-            active_seq = sequence[window_start:window_end]
             active_subset = None
+        else:
+            window_length = max(context_length, target_length)
+            pad_total = window_length - target_length
+            pad_left = pad_total // 2
+            window_start = max(0, start - pad_left)
+            window_end = min(sequence_length, window_start + window_length)
 
-        if len(active_seq) > model.max_context_length:
+            actual_window_length = window_end - window_start
+            if actual_window_length < window_length and window_start > 0:
+                window_start = max(0, window_end - window_length)
+
+            active_subset = (start - window_start, end - window_start)
+
+        map_sequence = sequence[window_start:window_end]
+        if len(map_sequence) > model.max_context_length:
             raise ValueError(
                 f"Dependency map window {map_id} context length "
-                f"{len(active_seq)} exceeds model context length "
+                f"{len(map_sequence)} exceeds model context length "
                 f"{model.max_context_length}"
             )
 
@@ -291,17 +525,17 @@ def run_dependency_maps(
             subset=active_subset,
         )
 
-        sample_count = job_options.num_samples(len(active_seq))
+        sample_count = job_options.num_samples(len(map_sequence))
         tqdm.write(
             "Computing dependency map "
             f"{map_id}: record={record_id}, subset=[{start}, {end}), "
             f"context=[{window_start}, {window_end}), "
-            f"context_length={len(active_seq)}, samples={sample_count}"
+            f"context_length={len(map_sequence)}, samples={sample_count}"
         )
 
         # Compute and save raw map arrays.
         result = DependencyMap.compute_batched(
-            active_seq,
+            map_sequence,
             tokenize_func,
             forward_func,
             batch_size=batch_size,
@@ -313,7 +547,6 @@ def run_dependency_maps(
         arrays = {
             "dependency_map": result.dependency_map,
             "sequence": np.array(list(result.sequence)),
-            "context_sequence": np.array(list(active_seq)),
         }
         if result.reconstruction is not None:
             arrays["reconstruction"] = result.reconstruction
@@ -338,7 +571,7 @@ def run_dependency_maps(
                 "Dependency: %{z:.4f}<extra></extra>"
             ),
         )
-        if mode == "region":
+        if mode == "region" and job["tile_index"] is not None:
             title = (
                 f"{map_id}<br>"
                 f"<sup>{record_id} region "
@@ -419,6 +652,9 @@ def run_dependency_maps(
                 "dataset_id": dataset_id,
                 "model_id": model_id,
                 "map_id": map_id,
+                "comparison_id": job["comparison_id"],
+                "map_role": job["map_role"],
+                "background_index": job["background_index"],
                 "record_id": record_id,
                 "region_id": job["region_id"],
                 "label": job["label"],
