@@ -164,12 +164,15 @@ def sample_background_starts(
             valid_starts.append(start)
 
     if len(valid_starts) < n_per_region:
-        raise ValueError(
-            f"Background sampling for target region {_region_id(target_region)} "
-            f"on record {target_record_id} found "
+        print(
+            "WARNING: Background sampling for target region "
+            f"{_region_id(target_region)} on record {target_record_id} found "
             f"{len(valid_starts)} valid candidate start(s), but "
             f"n_per_region={n_per_region}"
         )
+        n_per_region = len(valid_starts)
+    if not valid_starts:
+        return []
 
     sampled = rng.choice(
         valid_starts,
@@ -313,6 +316,7 @@ def run_dependency_maps(
                 f"{label!r} "
                 f"and record_ids {configured_record_ids!r}"
             )
+        skipped_background_regions = []
         for region in selected_regions.itertuples(index=False):
             region_start = int(region.start)
             region_end = int(region.end)
@@ -357,6 +361,37 @@ def run_dependency_maps(
                 if tile_intervals[-1] != final_tile:
                     tile_intervals.append(final_tile)
 
+            background_starts = None
+            if background_enabled:
+                record_regions = regions.loc[
+                    regions["record_id"] == record_id
+                ]
+                try:
+                    background_starts = sample_background_starts(
+                        region,
+                        record_regions,
+                        n_backgrounds_per_region,
+                        background_min_distance_bp,
+                        background_rng,
+                    )
+                except ValueError as error:
+                    skipped_background_regions.append(region_id)
+                    print(
+                        "WARNING: Skipping dependency-map region "
+                        f"{region_id} on record {record_id}; "
+                        "no matched backgrounds are available. "
+                        f"{error}"
+                    )
+                    continue
+                if not background_starts:
+                    skipped_background_regions.append(region_id)
+                    print(
+                        "WARNING: Skipping dependency-map region "
+                        f"{region_id} on record {record_id}; "
+                        "no matched backgrounds are available."
+                    )
+                    continue
+
             for tile_index, (tile_start, tile_end) in enumerate(
                 tile_intervals
             ):
@@ -388,16 +423,6 @@ def run_dependency_maps(
                     }
                 )
                 if background_enabled:
-                    record_regions = regions.loc[
-                        regions["record_id"] == record_id
-                    ]
-                    background_starts = sample_background_starts(
-                        region,
-                        record_regions,
-                        n_backgrounds_per_region,
-                        background_min_distance_bp,
-                        background_rng,
-                    )
                     for background_index, background_start in enumerate(
                         background_starts
                     ):
@@ -427,6 +452,12 @@ def run_dependency_maps(
                                 "background_index": background_index,
                             }
                         )
+        if skipped_background_regions:
+            print(
+                "WARNING: Skipped "
+                f"{len(skipped_background_regions)} dependency-map "
+                "region(s) because no matched backgrounds were available."
+            )
     else:
         raise ValueError(
             f"Unsupported dependency_maps mode: {mode}; "
