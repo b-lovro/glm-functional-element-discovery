@@ -7,7 +7,7 @@ overwrite: true
 # Include any supported task; block_scores can also run alone on an existing run.
 run_tasks:
   # - reconstruction
-  # - dependency_maps
+  - dependency_maps
   - block_scores
 
 dataset:
@@ -54,6 +54,9 @@ reconstruction:
   plot_results: true
 
 dependency_maps:
+  # Context around each configured region; it must fit the model context limit.
+  # If left empty, it will use the region length only.
+  context_length: 512
   # Selects either the manual or region block below. The other block is ignored.
   mode: manual
   # Controls batching in dependency-map model forward calls.

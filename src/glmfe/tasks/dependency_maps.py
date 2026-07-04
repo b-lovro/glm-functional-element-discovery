@@ -250,35 +250,70 @@ def run_dependency_maps(
                 f"[{start}, {end}) for sequence length {sequence_length}"
             )
 
-        window_sequence = sequence[start:end]
-        if len(window_sequence) > model.max_context_length:
+        context_length = dependency_config.get("context_length")
+
+        subset = (start, end)
+        if context_length is not None:
+            target_len = subset[1] - subset[0]
+            w_size = max(context_length, target_len)
+            pad_total = w_size - target_len
+            pad_left = pad_total // 2
+            
+            window_start = max(0, subset[0] - pad_left)
+            window_end = min(sequence_length, window_start + w_size)
+            
+            # Adjust if window_end hit the limit and we can shift left
+            actual_w_size = window_end - window_start
+            if actual_w_size < w_size and window_start > 0:
+                window_start = max(0, window_end - w_size)
+                
+            active_seq = sequence[window_start:window_end]
+            active_subset = (subset[0] - window_start, subset[1] - window_start)
+        else:
+            window_start = start
+            window_end = end
+            active_seq = sequence[window_start:window_end]
+            active_subset = None
+
+        if len(active_seq) > model.max_context_length:
             raise ValueError(
-                f"Dependency map window {map_id} length "
-                f"{len(window_sequence)} exceeds model context length "
+                f"Dependency map window {map_id} context length "
+                f"{len(active_seq)} exceeds model context length "
                 f"{model.max_context_length}"
             )
 
-        sample_count = options.num_samples(len(window_sequence))
+        job_options = DependencyMapOptions(
+            dependency_by_masking=dependency_by_masking,
+            with_reconstruction=with_reconstruction,
+            autoregressive=bool(
+                getattr(model, "dependency_autoregressive", False)
+            ),
+            subset=active_subset,
+        )
+
+        sample_count = job_options.num_samples(len(active_seq))
         tqdm.write(
             "Computing dependency map "
-            f"{map_id}: record={record_id}, window=[{start}, {end}), "
-            f"length={len(window_sequence)}, samples={sample_count}"
+            f"{map_id}: record={record_id}, subset=[{start}, {end}), "
+            f"context=[{window_start}, {window_end}), "
+            f"context_length={len(active_seq)}, samples={sample_count}"
         )
 
         # Compute and save raw map arrays.
         result = DependencyMap.compute_batched(
-            window_sequence,
+            active_seq,
             tokenize_func,
             forward_func,
             batch_size=batch_size,
-            options=options,
+            options=job_options,
         )
 
         relative_map_path = relative_record_maps_dir / f"{map_id}.npz"
         map_path = output_dir / relative_map_path
         arrays = {
             "dependency_map": result.dependency_map,
-            "sequence": np.array(window_sequence),
+            "sequence": np.array(list(result.sequence)),
+            "context_sequence": np.array(list(active_seq)),
         }
         if result.reconstruction is not None:
             arrays["reconstruction"] = result.reconstruction
@@ -321,6 +356,8 @@ def run_dependency_maps(
         )
         window_left = start / sequence_length
         window_right = end / sequence_length
+        context_left = window_start / sequence_length
+        context_right = window_end / sequence_length
         figure.add_shape(
             type="rect",
             x0=0,
@@ -331,6 +368,17 @@ def run_dependency_maps(
             yref="paper",
             fillcolor="#e5e7eb",
             line={"color": "#9ca3af", "width": 1},
+        )
+        figure.add_shape(
+            type="rect",
+            x0=context_left,
+            x1=context_right,
+            y0=1.08,
+            y1=1.12,
+            xref="paper",
+            yref="paper",
+            fillcolor="#93c5fd",
+            line={"color": "#60a5fa", "width": 1},
         )
         figure.add_shape(
             type="rect",
@@ -349,7 +397,8 @@ def run_dependency_maps(
             xref="paper",
             yref="paper",
             text=(
-                f"Full record: {sequence_length} nt | displayed window: "
+                f"Full record: {sequence_length} nt | context window: "
+                f"[{window_start}, {window_end}) | active subset: "
                 f"[{start}, {end}) ({end - start} nt)"
             ),
             showarrow=False,

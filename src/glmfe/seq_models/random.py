@@ -69,3 +69,17 @@ class RandomSequenceModel(BaseSequenceModel):
             batch_end = min(len(tokenized_sequences), batch_start + batch_size)
             logits.append(self.rng.random((batch_end - batch_start, sequence_length, 4)))
         return np.concatenate(logits, axis=0)
+
+    def prepare_for_training(self, lora_config: dict) -> None:
+        pass
+
+    def get_trainable_parameters(self) -> filter:
+        return filter(lambda p: False, [])
+
+    def compute_pretraining_loss(
+        self, 
+        sequences: list[str],
+        is_start: list[bool] | None = None,
+        is_end: list[bool] | None = None,
+    ) -> object:
+        raise NotImplementedError("RandomSequenceModel does not support training")
