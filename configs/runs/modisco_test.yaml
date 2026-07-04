@@ -1,0 +1,40 @@
+# TF-MoDISco (modisco-lite) motif discovery.
+#
+# Uses the CPU mock RiNALMo adapter so the input-building path runs locally.
+# `allow_missing_cli: true` lets a laptop without modisco-lite installed write
+# the (N,4,L) one-hot + attribution arrays and skip the motif-discovery call;
+# on the cluster (modisco-lite installed) it runs `modisco motifs`/`report`.
+# Swap the model block to a real `rinalmo` adapter for production runs.
+run_id: modisco_test
+overwrite: true
+
+run_tasks:
+  - modisco
+
+dataset:
+  dataset_id: ribosome
+  prepared_dir: data/prepared/ribosome
+
+model:
+  adapter: mock_rinalmo
+
+  mock_rinalmo:
+    size: micro
+    device: cpu
+    seed: 0
+
+modisco:
+  # Fixed window (bp) centred on each annotated region; must be <= model context.
+  window_length: 400
+  # Batch size for the per-position masked-reconstruction attribution passes.
+  batch_size: 64
+  # Attribution source hook (see tasks/modisco.py::compute_attributions).
+  attribution_method: reconstruction
+  # `modisco motifs -n`: max seqlets per metacluster.
+  max_seqlets_per_metacluster: 2000
+  # Generate the HTML report after motif discovery.
+  run_report: true
+  # Write inputs and skip the CLI when modisco-lite is not installed (local dev).
+  allow_missing_cli: true
+
+outputs_root: outputs/runs

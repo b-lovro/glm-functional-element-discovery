@@ -11,8 +11,8 @@ from pathlib import Path
 
 import yaml
 
-SUPPORTED_TASKS = {"reconstruction", "dependency_maps", "block_scores"}
-MODEL_TASKS = {"reconstruction", "dependency_maps"}
+SUPPORTED_TASKS = {"reconstruction", "dependency_maps", "block_scores", "modisco"}
+MODEL_TASKS = {"reconstruction", "dependency_maps", "modisco"}
 
 
 def main():
@@ -236,6 +236,18 @@ def main():
                     run_dir,
                 )
             task_results["block_scores"] = (per_span, per_map)
+        elif task == "modisco":
+            from glmfe.tasks.modisco import run_modisco
+
+            modisco_summary = run_modisco(
+                records,
+                regions,
+                model,
+                run_config["modisco"],
+                run_dir,
+                overwrite,
+            )
+            task_results["modisco"] = modisco_summary
 
     # Write the compact run manifest directly from the resolved configuration.
     manifest_path = run_dir / "manifest.json"
@@ -274,6 +286,9 @@ def main():
         manifest["block_scores"] = run_config["block_scores"]
         manifest["block_score_span_count"] = len(per_span)
         manifest["block_score_map_count"] = len(per_map)
+    if "modisco" in run_tasks:
+        manifest["modisco"] = run_config["modisco"]
+        manifest["modisco_summary"] = task_results["modisco"]
 
     with manifest_path.open("w") as handle:
         json.dump(manifest, handle, indent=2)
