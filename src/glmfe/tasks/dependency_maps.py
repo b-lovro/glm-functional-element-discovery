@@ -199,6 +199,7 @@ def run_dependency_maps(
     batch_size = int(dependency_config["batch_size"])
     dependency_by_masking = bool(dependency_config["dependency_by_masking"])
     with_reconstruction = bool(dependency_config["with_reconstruction"])
+    plot_results = bool(dependency_config.get("plot_results", True))
     configured_context_length = dependency_config.get("context_length")
     context_length = (
         None
@@ -489,7 +490,8 @@ def run_dependency_maps(
         f"{len(jobs)} job(s), mode={mode}, batch_size={batch_size}, "
         f"autoregressive={options.autoregressive}, "
         f"dependency_by_masking={dependency_by_masking}, "
-        f"with_reconstruction={with_reconstruction}"
+        f"with_reconstruction={with_reconstruction}, "
+        f"plot_results={plot_results}"
     )
 
     def tokenize_func(sequence: str, mask: int | None) -> object:
@@ -588,99 +590,103 @@ def run_dependency_maps(
         if result.reconstruction is not None:
             arrays["reconstruction"] = result.reconstruction
         np.savez_compressed(map_path, **arrays)
-        tqdm.write(f"Writing dependency map plots: {map_id}")
+        relative_html_plot_path = None
+        relative_pdf_plot_path = None
+        if plot_results:
+            tqdm.write(f"Writing dependency map plots: {map_id}")
 
-        # Create and save visualizations.
-        relative_html_plot_path = (
-            relative_record_maps_dir / f"{map_id}.html"
-        )
-        relative_pdf_plot_path = (
-            relative_record_maps_dir / f"{map_id}.pdf"
-        )
-        if not hasattr(matplotlib_cm, "get_cmap"):
-            matplotlib_cm.get_cmap = colormaps.get_cmap
-        figure = result.plot()
-        figure.update_traces(
-            colorbar_title_text="Dependency",
-            hovertemplate=(
-                "Affected position: %{x}<br>"
-                "Changed position: %{y}<br>"
-                "Dependency: %{z:.4f}<extra></extra>"
-            ),
-        )
-        if mode == "region" and job["tile_index"] is not None:
-            title = (
-                f"{map_id}<br>"
-                f"<sup>{record_id} region "
-                f"[{job['region_start']}, {job['region_end']}) | "
-                f"tile {job['tile_index']:03d} [{start}, {end})</sup>"
+            # Create and save visualizations.
+            relative_html_plot_path = (
+                relative_record_maps_dir / f"{map_id}.html"
             )
-        else:
-            title = (
-                f"{map_id}<br>"
-                f"<sup>{record_id} [{start}, {end})</sup>"
+            relative_pdf_plot_path = (
+                relative_record_maps_dir / f"{map_id}.pdf"
             )
-        figure.update_layout(
-            title=title,
-            margin={"l": 80, "r": 80, "t": 180, "b": 80},
-        )
-        window_left = start / sequence_length
-        window_right = end / sequence_length
-        context_left = window_start / sequence_length
-        context_right = window_end / sequence_length
-        figure.add_shape(
-            type="rect",
-            x0=0,
-            x1=1,
-            y0=1.08,
-            y1=1.12,
-            xref="paper",
-            yref="paper",
-            fillcolor="#e5e7eb",
-            line={"color": "#9ca3af", "width": 1},
-        )
-        figure.add_shape(
-            type="rect",
-            x0=context_left,
-            x1=context_right,
-            y0=1.08,
-            y1=1.12,
-            xref="paper",
-            yref="paper",
-            fillcolor="#93c5fd",
-            line={"color": "#60a5fa", "width": 1},
-        )
-        figure.add_shape(
-            type="rect",
-            x0=window_left,
-            x1=window_right,
-            y0=1.08,
-            y1=1.12,
-            xref="paper",
-            yref="paper",
-            fillcolor="#2563eb",
-            line={"color": "#1d4ed8", "width": 1},
-        )
-        figure.add_annotation(
-            x=0.5,
-            y=1.15,
-            xref="paper",
-            yref="paper",
-            text=(
-                f"Full record: {sequence_length} nt | context window: "
-                f"[{window_start}, {window_end}) | active subset: "
-                f"[{start}, {end}) ({end - start} nt)"
-            ),
-            showarrow=False,
-        )
-        figure.write_html(
-            output_dir / relative_html_plot_path,
-            include_plotlyjs=True,
-        )
-        figure.write_image(
-            output_dir / relative_pdf_plot_path,
-            format="pdf",
-        )
+            if not hasattr(matplotlib_cm, "get_cmap"):
+                matplotlib_cm.get_cmap = colormaps.get_cmap
+            figure = result.plot()
+            figure.update_traces(
+                colorbar_title_text="Dependency",
+                hovertemplate=(
+                    "Affected position: %{x}<br>"
+                    "Changed position: %{y}<br>"
+                    "Dependency: %{z:.4f}<extra></extra>"
+                ),
+            )
+            if mode == "region" and job["tile_index"] is not None:
+                title = (
+                    f"{map_id}<br>"
+                    f"<sup>{record_id} region "
+                    f"[{job['region_start']}, {job['region_end']}) | "
+                    f"tile {job['tile_index']:03d} [{start}, {end})"
+                    "</sup>"
+                )
+            else:
+                title = (
+                    f"{map_id}<br>"
+                    f"<sup>{record_id} [{start}, {end})</sup>"
+                )
+            figure.update_layout(
+                title=title,
+                margin={"l": 80, "r": 80, "t": 180, "b": 80},
+            )
+            window_left = start / sequence_length
+            window_right = end / sequence_length
+            context_left = window_start / sequence_length
+            context_right = window_end / sequence_length
+            figure.add_shape(
+                type="rect",
+                x0=0,
+                x1=1,
+                y0=1.08,
+                y1=1.12,
+                xref="paper",
+                yref="paper",
+                fillcolor="#e5e7eb",
+                line={"color": "#9ca3af", "width": 1},
+            )
+            figure.add_shape(
+                type="rect",
+                x0=context_left,
+                x1=context_right,
+                y0=1.08,
+                y1=1.12,
+                xref="paper",
+                yref="paper",
+                fillcolor="#93c5fd",
+                line={"color": "#60a5fa", "width": 1},
+            )
+            figure.add_shape(
+                type="rect",
+                x0=window_left,
+                x1=window_right,
+                y0=1.08,
+                y1=1.12,
+                xref="paper",
+                yref="paper",
+                fillcolor="#2563eb",
+                line={"color": "#1d4ed8", "width": 1},
+            )
+            figure.add_annotation(
+                x=0.5,
+                y=1.15,
+                xref="paper",
+                yref="paper",
+                text=(
+                    f"Full record: {sequence_length} nt | context window: "
+                    f"[{window_start}, {window_end}) | active subset: "
+                    f"[{start}, {end}) ({end - start} nt)"
+                ),
+                showarrow=False,
+            )
+            figure.write_html(
+                output_dir / relative_html_plot_path,
+                include_plotlyjs=True,
+            )
+            figure.write_image(
+                output_dir / relative_pdf_plot_path,
+                format="pdf",
+            )
         tqdm.write(f"Finished dependency map: {map_id}")
 
         rows.append(
@@ -711,8 +717,16 @@ def run_dependency_maps(
                 "dependency_by_masking": dependency_by_masking,
                 "with_reconstruction": with_reconstruction,
                 "map_path": str(relative_map_path),
-                "html_plot_path": str(relative_html_plot_path),
-                "pdf_plot_path": str(relative_pdf_plot_path),
+                "html_plot_path": (
+                    None
+                    if relative_html_plot_path is None
+                    else str(relative_html_plot_path)
+                ),
+                "pdf_plot_path": (
+                    None
+                    if relative_pdf_plot_path is None
+                    else str(relative_pdf_plot_path)
+                ),
             }
         )
 

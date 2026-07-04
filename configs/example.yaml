@@ -65,6 +65,8 @@ dependency_maps:
   dependency_by_masking: false
   # Also store reconstruction probabilities in each saved map result.
   with_reconstruction: true
+  # Write HTML/PDF dependency-map plots. Disable for raw .npz-only runs.
+  plot_results: false
 
   manual:
     # Apply this 0-based, end-exclusive interval to every listed record.
