@@ -38,11 +38,12 @@ external/
 # Outputs
 outputs/
 runs/
-!configs/runs/
-!configs/runs/*.yaml
+configs/runs/
+configs/runs/*.yaml
 wandb/
 logs/
 jobs/
+.claude/
 
 # OS/editor junk
 .DS_Store

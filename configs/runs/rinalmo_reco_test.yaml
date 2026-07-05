@@ -1,4 +1,4 @@
-run_id: rinalmo_depmap_ctcf
+run_id: rinalmo_block_depmap_ttf1
 overwrite: true
 
 run_tasks:
@@ -24,17 +24,23 @@ model:
 #  plot_results: true
 
 dependency_maps:
+   context_length: 1022
    mode: region
    batch_size: 8
    dependency_by_masking: false
    with_reconstruction: true
 
    region:
-     label: CTCF
+     label: TTF1
      record_ids: all
      long_region_policy: tile
      tile_length: 512
      tile_stride: 384
+     background:
+      enabled: true
+      n_per_region: 5
+      min_distance_bp: 5
+      seed: 42
 
 block_scores:
   # Width of the consecutive diagonal dependency block in nucleotides.

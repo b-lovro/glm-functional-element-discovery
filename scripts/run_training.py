@@ -69,11 +69,11 @@ def main():
             weights_path=repository_root / model_config["weights"],
             device=model_config["device"],
         )
-    elif adapter == "evo2":
-        from glmfe.seq_models.evo2 import load_evo2_model
+    elif adapter == "evo":
+        from glmfe.seq_models.evo import load_evo_model
 
         cache_dir = model_config["cache_dir"] if "cache_dir" in model_config else None
-        model = load_evo2_model(
+        model = load_evo_model(
             model_name=model_config["model_name"],
             device=model_config["device"],
             cache_dir=repository_root / cache_dir if cache_dir else None,
