@@ -212,7 +212,7 @@ def discover_novel_motifs(full_nuc_df, threshold, block_size):
         return pd.DataFrame(discovered)
         
     # Filter for unannotated positives exceeding the strict threshold
-    fp_df = full_nuc_df[(~full_nuc_df['is_annotated']) & (full_nuc_df['block_score'] >= threshold)].copy()
+    fp_df = full_nuc_df[(~full_nuc_df['is_annotated_discovery']) & (full_nuc_df['block_score'] >= threshold)].copy()
     if fp_df.empty:
         return pd.DataFrame(discovered)
         
@@ -331,15 +331,18 @@ def main():
             (regions_df['end'] > region_start)
         ]
         
-        is_annotated = np.zeros(region_length, dtype=bool)
+        is_annotated_strict = np.zeros(region_length, dtype=bool)
+        is_annotated_discovery = np.zeros(region_length, dtype=bool)
         feature_masks = {}
         
         for _, annot in map_annots.iterrows():
             ann_start = max(0, annot['start'] - region_start)
             ann_end = min(region_length, annot['end'] - region_start)
             if ann_start < ann_end:
-                is_annotated[ann_start:ann_end] = True
                 ftype = annot['feature_type']
+                is_annotated_strict[ann_start:ann_end] = True
+                if ftype not in ['EnhancerRepeats', 'Upstream']:
+                    is_annotated_discovery[ann_start:ann_end] = True
                 if ftype not in feature_masks:
                     feature_masks[ftype] = np.zeros(region_length, dtype=bool)
                 feature_masks[ftype][ann_start:ann_end] = True
@@ -351,7 +354,8 @@ def main():
             "record_id": record_id,
             "position": abs_positions,
             "block_score": y_score,
-            "is_annotated": is_annotated
+            "is_annotated_strict": is_annotated_strict,
+            "is_annotated_discovery": is_annotated_discovery
         })
         for ftype in all_feature_types:
             nuc_df[f"feature_{ftype}"] = feature_masks.get(ftype, np.zeros(region_length, dtype=bool))
@@ -364,7 +368,7 @@ def main():
                 global_y_score[ftype] = []
                 
             y_true_M = feature_masks.get(ftype, np.zeros(region_length, dtype=bool))
-            valid_mask = ((y_true_M == True) | (~is_annotated)) & (~np.isnan(y_score))
+            valid_mask = ((y_true_M == True) | (~is_annotated_strict)) & (~np.isnan(y_score))
             
             if np.sum(valid_mask) == 0:
                 continue
@@ -434,7 +438,7 @@ def main():
     if all_nucleotides:
         block_size = per_span['block_size'].iloc[0]
         
-        bg_scores = full_nuc_df.loc[~full_nuc_df['is_annotated'], 'block_score'].dropna()
+        bg_scores = full_nuc_df.loc[~full_nuc_df['is_annotated_discovery'], 'block_score'].dropna()
         if len(bg_scores) > 0:
             p95_thresh = np.percentile(bg_scores, 95)
         else:
