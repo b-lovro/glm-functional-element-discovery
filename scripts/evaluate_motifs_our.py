@@ -3,6 +3,11 @@ import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
+
+repo_root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(repo_root / "src"))
+from glmfe.tasks.dependency_maps import sample_background_starts
+
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, accuracy_score
 import matplotlib
 matplotlib.use("Agg")
@@ -168,18 +173,12 @@ def main():
             (regions_df['end'] > region_start)
         ]
         
-        is_annotated = np.zeros(region_length, dtype=bool)
+        record_regions = regions_df[regions_df['record_id'] == record_id]
         
         for _, annot in map_annots.iterrows():
-            ann_start = max(0, int(annot['start']) - region_start)
-            ann_end = min(region_length, int(annot['end']) - region_start)
-            if ann_start < ann_end:
-                is_annotated[ann_start:ann_end] = True
-                
-        for _, annot in map_annots.iterrows():
-            ann_start = max(0, int(annot['start']) - region_start)
-            ann_end = min(region_length, int(annot['end']) - region_start)
-            L = ann_end - ann_start
+            ann_start_abs = int(annot['start'])
+            ann_end_abs = int(annot['end'])
+            L = ann_end_abs - ann_start_abs
             
             if L < block_size:
                 continue # Motif is smaller than block size, cannot strictly enclose a block
@@ -193,6 +192,8 @@ def main():
                 global_y_score[ftype] = []
                 
             # POSITIVE CLASS: strict block enclosure
+            ann_start = max(0, ann_start_abs - region_start)
+            ann_end = min(region_length, ann_end_abs - region_start)
             pos_mask = (span_starts_at_pos >= ann_start) & (span_starts_at_pos + block_size <= ann_end) & (~np.isnan(y_score))
             
             y_s_pos = y_score[pos_mask]
@@ -202,25 +203,32 @@ def main():
                 global_y_score[ftype].append(y_s_pos)
                 global_y_true[ftype].append(y_t_pos)
             
-            # NEGATIVE CLASS: sample N unannotated windows of length L
-            valid_bg_starts = []
-            for bg_s in range(region_length - L + 1):
-                if not np.any(is_annotated[bg_s:bg_s+L]):
-                    valid_bg_starts.append(bg_s)
-                    
-            if len(valid_bg_starts) > 0:
-                n_samples = min(N_BACKGROUND_WINDOWS, len(valid_bg_starts))
-                sampled_bg_starts = np.random.choice(valid_bg_starts, size=n_samples, replace=False)
+            # NEGATIVE CLASS: sample N unannotated windows using pipeline code
+            try:
+                sampled_bg_starts_abs = sample_background_starts(
+                    target_region=annot,
+                    record_regions=record_regions,
+                    n_per_region=N_BACKGROUND_WINDOWS,
+                    min_distance_bp=0,
+                    rng=np.random.default_rng(42)
+                )
+            except ValueError as e:
+                # E.g. if it fails to find strict parent annotation
+                continue
                 
-                for bg_start in sampled_bg_starts:
-                    bg_end = bg_start + L
-                    bg_mask = (span_starts_at_pos >= bg_start) & (span_starts_at_pos + block_size <= bg_end) & (~np.isnan(y_score))
-                    y_s_neg = y_score[bg_mask]
-                    y_t_neg = np.zeros(len(y_s_neg), dtype=int)
-                    
-                    if len(y_s_neg) > 0:
-                        global_y_score[ftype].append(y_s_neg)
-                        global_y_true[ftype].append(y_t_neg)
+            for bg_start_abs in sampled_bg_starts_abs:
+                bg_end_abs = bg_start_abs + L
+                
+                bg_s = bg_start_abs - region_start
+                bg_e = bg_end_abs - region_start
+                
+                bg_mask = (span_starts_at_pos >= bg_s) & (span_starts_at_pos + block_size <= bg_e) & (~np.isnan(y_score))
+                y_s_neg = y_score[bg_mask]
+                y_t_neg = np.zeros(len(y_s_neg), dtype=int)
+                
+                if len(y_s_neg) > 0:
+                    global_y_score[ftype].append(y_s_neg)
+                    global_y_true[ftype].append(y_t_neg)
 
     print("Computing global metrics...")
     global_metrics = []

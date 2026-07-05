@@ -4,6 +4,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_curve, auc, precision_recall_curve, accuracy_score
+import sys
+from pathlib import Path
+
+# Add dependency_map to path
+sys.path.insert(0, str(Path('external/dependency_map/src').resolve()))
+from dependency_map import DependencyMap
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -66,6 +72,112 @@ def plot_boxplots(global_y_true, global_y_score, output_dir):
         plt.close()
 
 
+def plot_discovered_motifs(novel_df, per_span, output_dir, window_size=200):
+    if novel_df.empty:
+        return
+        
+    plots_dir = output_dir / "discovered_motifs_plots"
+    plots_dir.mkdir(exist_ok=True)
+    
+    for _, row in novel_df.iterrows():
+        record_id = row['record_id']
+        region_id = row['region_id']
+        motif_start = row['start_position']
+        motif_end = row['end_position']
+        ftype = row['feature_type']
+        
+        motif_center = (motif_start + motif_end) // 2
+        window_start = motif_center - (window_size // 2)
+        window_end = motif_center + (window_size // 2)
+        
+        # Filter per_span
+        df = per_span[(per_span['record_id'] == record_id) & (per_span['region_id'] == region_id)].copy()
+        if df.empty:
+            continue
+            
+        block_size = df['block_size'].iloc[0]
+        df['span_center'] = df['span_start'] + block_size / 2
+        
+        window_df = df[(df['span_center'] >= window_start) & (df['span_center'] <= window_end)]
+        window_df = window_df.sort_values('span_center')
+        
+        plt.figure(figsize=(10, 6))
+        plt.axvspan(motif_start, motif_end, color='red', alpha=0.2, label=f'Discovered {ftype} Motif')
+        plt.plot(window_df['span_center'], window_df['block_score'], color='blue', linewidth=2, label='Dependency Score')
+        plt.scatter(window_df['span_center'], window_df['block_score'], color='blue', s=15)
+        
+        plt.xlabel('Genomic Position')
+        plt.ylabel('Block Score')
+        plt.title(f'Dependency Map around Discovered Motif ({ftype})\n{record_id}:{motif_start}-{motif_end}')
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend()
+        
+        # Create safe filename
+        safe_rec = str(record_id).replace('/', '_').replace(' ', '_')
+        out_path = plots_dir / f"{ftype}_{safe_rec}_{motif_start}.pdf"
+        plt.savefig(out_path, bbox_inches='tight')
+        plt.close()
+        
+        # --- True 2D Dependency Map ---
+        try:
+            # Locate map_index.parquet
+            run_dir = output_dir.parent
+            map_index_path = run_dir / "dependency_maps" / "map_index.parquet"
+            if map_index_path.exists():
+                map_idx_df = pd.read_parquet(map_index_path)
+                
+                # Find the map that covers the motif center
+                matches = map_idx_df[(map_idx_df['region_id'] == region_id) & 
+                                     (map_idx_df['start'] <= motif_center) & 
+                                     (map_idx_df['end'] >= motif_center)]
+                
+                if not matches.empty:
+                    match = matches.iloc[0]
+                    map_path = run_dir / match['map_path']
+                    
+                    data = np.load(map_path)
+                    map_2d = data['dependency_map']
+                    recon = data['reconstruction']
+                    seq_str = ''.join(data['sequence'].astype(str))
+                    
+                    map_start = match['start']
+                    map_end = match['end']
+                    
+                    # Calculate window bounds relative to the map
+                    win_start_genomic = max(map_start, motif_center - window_size // 2)
+                    win_end_genomic = min(map_end, motif_center + window_size // 2)
+                    
+                    start_idx = win_start_genomic - map_start
+                    end_idx = win_end_genomic - map_start
+                    
+                    sub_map = map_2d[start_idx:end_idx, start_idx:end_idx]
+                    sub_recon = recon[start_idx:end_idx]
+                    sub_seq = seq_str[start_idx:end_idx]
+                    
+                    dm = DependencyMap(sub_seq, sub_map, sub_recon)
+                    fig = dm.plot()
+                    
+                    # Highlight motif
+                    # Relative position in the window
+                    rel_motif_start = motif_start - win_start_genomic
+                    rel_motif_end = motif_end - win_start_genomic
+                    
+                    fig.add_shape(
+                        type="rect",
+                        x0=rel_motif_start, y0=rel_motif_start, 
+                        x1=rel_motif_end, y1=rel_motif_end,
+                        line=dict(color="red", width=2),
+                        fillcolor="rgba(255, 0, 0, 0.1)"
+                    )
+                    
+                    out_html = plots_dir / f"{ftype}_{safe_rec}_{motif_start}_true2d.html"
+                    out_pdf_2d = plots_dir / f"{ftype}_{safe_rec}_{motif_start}_true2d.pdf"
+                    
+                    fig.write_html(str(out_html))
+                    fig.write_image(str(out_pdf_2d))
+        except Exception as e:
+            print(f"Warning: Failed to generate true 2D dependency map for {motif_start}: {e}")
+
 def get_optimal_metrics(y_true, y_score):
     if len(np.unique(y_true)) < 2:
         return np.nan, np.nan, np.nan, np.nan, np.nan
@@ -92,6 +204,51 @@ def get_optimal_metrics(y_true, y_score):
     
     return roc_auc, accuracy, precision, recall, best_threshold
 
+
+def discover_novel_motifs(full_nuc_df, threshold, block_size):
+    discovered = []
+    
+    if np.isnan(threshold) or threshold == np.inf:
+        return pd.DataFrame(discovered)
+        
+    # Filter for unannotated positives exceeding the strict threshold
+    fp_df = full_nuc_df[(~full_nuc_df['is_annotated']) & (full_nuc_df['block_score'] >= threshold)].copy()
+    if fp_df.empty:
+        return pd.DataFrame(discovered)
+        
+    fp_df = fp_df.sort_values(['record_id', 'region_id', 'position'])
+    
+    length_bounds = {
+        'Core': (55, 168),
+        'CTCF': (20, 20),
+        'TTF1': (18, 18)
+    }
+    
+    # Group to find contiguous spans
+    for (rec_id, reg_id), group in fp_df.groupby(['record_id', 'region_id']):
+        group['block_id'] = (group['position'].diff() > 1).cumsum()
+        
+        for block_id, span in group.groupby('block_id'):
+            seq_length = len(span) + block_size - 1
+            
+            for ftype, (min_len, max_len) in length_bounds.items():
+                if min_len <= seq_length <= max_len:
+                    start_pos = span['position'].min() - block_size // 2
+                    end_pos = start_pos + seq_length
+                    
+                    discovered.append({
+                        'feature_type': ftype,
+                        'record_id': rec_id,
+                        'region_id': reg_id,
+                        'start_position': start_pos,
+                        'end_position': end_pos,
+                        'genomic_length': seq_length,
+                        'center_count': len(span),
+                        'mean_score': span['block_score'].mean(),
+                        'max_score': span['block_score'].max()
+                    })
+                
+    return pd.DataFrame(discovered)
 
 def main():
     if len(sys.argv) < 2:
@@ -240,11 +397,13 @@ def main():
         
     print("Computing global metrics...")
     global_metrics = []
+    best_thresholds = {}
     for ftype in sorted(global_y_true.keys()):
         y_t = np.concatenate(global_y_true[ftype])
         y_s = np.concatenate(global_y_score[ftype])
         
         roc_auc, acc, prec, rec, best_thresh = get_optimal_metrics(y_t, y_s)
+        best_thresholds[ftype] = best_thresh
         
         global_metrics.append({
             "feature_type": ftype,
@@ -270,6 +429,25 @@ def main():
     print("Generating plots...")
     plot_roc_curves(global_y_true, global_y_score, output_dir)
     plot_boxplots(global_y_true, global_y_score, output_dir)
+    
+    print("Discovering novel motifs...")
+    if all_nucleotides:
+        block_size = per_span['block_size'].iloc[0]
+        
+        bg_scores = full_nuc_df.loc[~full_nuc_df['is_annotated'], 'block_score'].dropna()
+        if len(bg_scores) > 0:
+            p95_thresh = np.percentile(bg_scores, 95)
+        else:
+            p95_thresh = np.inf
+            
+        print(f"Using 95th percentile threshold for discovery: {p95_thresh:.4f}")
+        
+        novel_df = discover_novel_motifs(full_nuc_df, p95_thresh, block_size)
+        novel_df.to_csv(output_dir / "discovered_novel_motifs.csv", index=False)
+        print(f"Found {len(novel_df)} novel motif spans.")
+        if len(novel_df) > 0:
+            print("Plotting discovered motifs...")
+            plot_discovered_motifs(novel_df, per_span, output_dir)
     
     print(f"Evaluation complete. Results saved to {output_dir}")
 
