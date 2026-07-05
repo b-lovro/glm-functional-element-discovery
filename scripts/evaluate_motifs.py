@@ -38,7 +38,7 @@ def plot_roc_curves(global_y_true, global_y_score, output_dir):
     plt.close()
     
 
-def plot_histograms(global_y_true, global_y_score, output_dir):
+def plot_boxplots(global_y_true, global_y_score, output_dir):
     for feature_type in sorted(global_y_true.keys()):
         y_true = np.concatenate(global_y_true[feature_type])
         y_score = np.concatenate(global_y_score[feature_type])
@@ -50,16 +50,18 @@ def plot_histograms(global_y_true, global_y_score, output_dir):
         pos_scores = y_score[y_true == 1]
         neg_scores = y_score[y_true == 0]
         
-        plt.hist(neg_scores, bins=50, density=True, color='blue', alpha=0.5, label='Background')
+        data = [neg_scores]
+        labels = ['Background']
         if len(pos_scores) > 0:
-            plt.hist(pos_scores, bins=50, density=True, color='red', alpha=0.5, label=f'{feature_type}')
+            data.append(pos_scores)
+            labels.append(feature_type)
+            
+        plt.boxplot(data, labels=labels)
         
         plt.title(f'Block Score Distribution: {feature_type} vs Background')
-        plt.xlabel('Block Score')
-        plt.ylabel('Density')
-        plt.legend()
+        plt.ylabel('Block Score')
         
-        out_path = output_dir / f"histogram_{feature_type}.pdf"
+        out_path = output_dir / f"boxplot_{feature_type}.pdf"
         plt.savefig(out_path, bbox_inches='tight')
         plt.close()
 
@@ -134,6 +136,9 @@ def main():
     global_y_score = {}
     
     file_metrics = []
+    
+    # Get all unique feature types to evaluate every motif across all regions
+    all_feature_types = regions_df[regions_df['label'] != 'CompositePromoter']['feature_type'].unique()
 
     print("Evaluating regions...")
     for (region_id, record_id, region_start, region_end, region_length), group in tqdm(region_groups):
@@ -191,17 +196,17 @@ def main():
             "block_score": y_score,
             "is_annotated": is_annotated
         })
-        for ftype, mask in feature_masks.items():
-            nuc_df[f"feature_{ftype}"] = mask
+        for ftype in all_feature_types:
+            nuc_df[f"feature_{ftype}"] = feature_masks.get(ftype, np.zeros(region_length, dtype=bool))
         all_nucleotides.append(nuc_df)
         
-        # Evaluate for each feature type
-        for ftype in feature_masks.keys():
+        # Evaluate for each feature type globally across all regions
+        for ftype in all_feature_types:
             if ftype not in global_y_true:
                 global_y_true[ftype] = []
                 global_y_score[ftype] = []
                 
-            y_true_M = feature_masks[ftype]
+            y_true_M = feature_masks.get(ftype, np.zeros(region_length, dtype=bool))
             valid_mask = ((y_true_M == True) | (~is_annotated)) & (~np.isnan(y_score))
             
             if np.sum(valid_mask) == 0:
@@ -264,7 +269,7 @@ def main():
 
     print("Generating plots...")
     plot_roc_curves(global_y_true, global_y_score, output_dir)
-    plot_histograms(global_y_true, global_y_score, output_dir)
+    plot_boxplots(global_y_true, global_y_score, output_dir)
     
     print(f"Evaluation complete. Results saved to {output_dir}")
 
