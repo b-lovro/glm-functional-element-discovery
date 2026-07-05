@@ -79,6 +79,7 @@ def main():
     # Format axes to show nucleotide characters along the borders
     fig.update_xaxes(
         visible=True,
+        showticklabels=False,
         tickmode='array',
         tickvals=np.arange(len(seq_str)),
         ticktext=list(seq_str),
@@ -92,6 +93,7 @@ def main():
     )
     fig.update_yaxes(
         visible=True,
+        showticklabels=False,
         tickmode='array',
         tickvals=np.arange(len(seq_str)),
         ticktext=list(seq_str),
@@ -114,7 +116,7 @@ def main():
     # Shrink the main yaxis domain to make room at the bottom
     fig.update_layout(
         yaxis=dict(domain=[0.10, 1.0]),
-        legend=dict(x=1.05, y=1.0, xanchor='left', yanchor='top')
+        legend=dict(x=1.0, y=1.0, xanchor='left', yanchor='top', bgcolor='rgba(255,255,255,0.8)')
     )
     
     # Hide the heatmap colorbar
@@ -144,11 +146,11 @@ def main():
             domain=[0.25, 0.75], 
             anchor='y2',
             range=[0, fasta_length],
-            title=dict(text="Genomic Sequence Coordinate (Fasta File)", font=dict(size=12)),
+            title=dict(text="Genomic Sequence Coordinate (Fasta File)", font=dict(size=8)),
             tickvals=[0, tile_start, tile_end, fasta_length],
             ticktext=['0', str(tile_start), str(tile_end), str(fasta_length)],
             tickangle=45,
-            tickfont=dict(size=11)
+            tickfont=dict(size=6)
         ),
         yaxis2=dict(
             domain=[0.0, 0.03], 
@@ -266,20 +268,20 @@ def main():
                 fig_sub.update_traces(showscale=False, selector=dict(type='heatmap'))
                 
                 sub_out_html = out_dir / f"{safe_region}_tile{args.tile_index}_{ftype}_{annot['start']}_{annot['end']}.html"
-                sub_out_pdf = out_dir / f"{safe_region}_tile{args.tile_index}_{ftype}_{annot['start']}_{annot['end']}.pdf"
+                sub_out_png = out_dir / f"{safe_region}_tile{args.tile_index}_{ftype}_{annot['start']}_{annot['end']}.png"
                 fig_sub.write_html(str(sub_out_html))
-                fig_sub.write_image(str(sub_out_pdf))
+                fig_sub.write_image(str(sub_out_png), scale=3)
     else:
         print(f"Warning: Regions file not found at {regions_path}. No annotations will be highlighted.")
 
     # Save full tile outputs
     out_html = out_dir / f"{safe_region}_tile{args.tile_index}_annotated.html"
-    out_pdf = out_dir / f"{safe_region}_tile{args.tile_index}_annotated.pdf"
+    out_png = out_dir / f"{safe_region}_tile{args.tile_index}_annotated.png"
     
     print(f"Saving interactive HTML to {out_html}...")
     fig.write_html(str(out_html))
-    print(f"Saving static PDF to {out_pdf}...")
-    fig.write_image(str(out_pdf))
+    print(f"Saving static high-res PNG to {out_png}...")
+    fig.write_image(str(out_png), scale=3)
     print("Done!")
 
 if __name__ == "__main__":

@@ -39,8 +39,8 @@ def plot_roc_curves(global_y_true, global_y_score, output_dir):
     plt.title('Receiver Operating Characteristic (ROC) - Single Nucleotide')
     plt.legend(loc="lower right")
     
-    out_path = output_dir / "roc_curves_global.pdf"
-    plt.savefig(out_path, bbox_inches='tight')
+    out_path = output_dir / "roc_curves_global.png"
+    plt.savefig(out_path, bbox_inches='tight', dpi=300)
     plt.close()
     
 
@@ -67,8 +67,8 @@ def plot_boxplots(global_y_true, global_y_score, output_dir):
         plt.title(f'Block Score Distribution: {feature_type} vs Background')
         plt.ylabel('Block Score')
         
-        out_path = output_dir / f"boxplot_{feature_type}.pdf"
-        plt.savefig(out_path, bbox_inches='tight')
+        out_path = output_dir / f"boxplot_{feature_type}.png"
+        plt.savefig(out_path, bbox_inches='tight', dpi=300)
         plt.close()
 
 
@@ -114,8 +114,8 @@ def plot_discovered_motifs(novel_df, per_span, output_dir, window_size=200):
         
         # Create safe filename
         safe_rec = str(record_id).replace('/', '_').replace(' ', '_')
-        out_path = plots_dir / f"{ftype}_{safe_rec}_{motif_start}.pdf"
-        plt.savefig(out_path, bbox_inches='tight')
+        out_path = plots_dir / f"{ftype}_{safe_rec}_{motif_start}.png"
+        plt.savefig(out_path, bbox_inches='tight', dpi=300)
         plt.close()
         
         # --- True 2D Dependency Map ---
@@ -166,15 +166,15 @@ def plot_discovered_motifs(novel_df, per_span, output_dir, window_size=200):
                         type="rect",
                         x0=rel_motif_start, y0=rel_motif_start, 
                         x1=rel_motif_end, y1=rel_motif_end,
-                        line=dict(color="red", width=2),
-                        fillcolor="rgba(255, 0, 0, 0.1)"
+                        line=dict(color="red", width=1),
+                        fillcolor="rgba(0,0,0,0)"
                     )
                     
                     out_html = plots_dir / f"{ftype}_{safe_rec}_{motif_start}_true2d.html"
-                    out_pdf_2d = plots_dir / f"{ftype}_{safe_rec}_{motif_start}_true2d.pdf"
+                    out_png_2d = plots_dir / f"{ftype}_{safe_rec}_{motif_start}_true2d.png"
                     
                     fig.write_html(str(out_html))
-                    fig.write_image(str(out_pdf_2d))
+                    fig.write_image(str(out_png_2d), scale=3)
         except Exception as e:
             print(f"Warning: Failed to generate true 2D dependency map for {motif_start}: {e}")
 
