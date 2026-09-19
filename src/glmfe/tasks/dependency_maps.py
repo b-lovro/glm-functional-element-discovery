@@ -460,16 +460,109 @@ def run_dependency_maps(
                                 "background_index": background_index,
                             }
                         )
-        if skipped_background_regions:
-            print(
-                "WARNING: Skipped "
-                f"{len(skipped_background_regions)} dependency-map "
-                "region(s) because no matched backgrounds were available."
+    elif mode == "full_sequence":
+        full_sequence_config = dependency_config["full_sequence"]
+        configured_record_ids = full_sequence_config["record_ids"]
+        long_region_policy = str(full_sequence_config["long_region_policy"])
+        tile_length = int(full_sequence_config["tile_length"])
+        tile_stride = int(full_sequence_config["tile_stride"])
+
+        if long_region_policy != "tile":
+            raise ValueError(
+                "dependency_maps.full_sequence.long_region_policy must be 'tile'"
             )
+        if tile_length > model.max_context_length:
+            raise ValueError(
+                f"dependency_maps.full_sequence.tile_length {tile_length} "
+                f"exceeds model context length {model.max_context_length}"
+            )
+        if tile_stride < 1:
+            raise ValueError(
+                f"dependency_maps.full_sequence.tile_stride {tile_stride} must be at least 1"
+            )
+        if tile_stride > tile_length:
+            raise ValueError(
+                f"dependency_maps.full_sequence.tile_stride {tile_stride} "
+                f"cannot exceed tile_length {tile_length}"
+            )
+
+        if configured_record_ids == "half":
+            selected_records = records.iloc[: max(1, len(records) // 2)]
+        elif configured_record_ids == "all":
+            selected_records = records
+        elif isinstance(configured_record_ids, list):
+            selected_records = records.loc[
+                records["record_id"].isin(configured_record_ids)
+            ]
+        else:
+            raise ValueError(
+                "dependency_maps.full_sequence.record_ids must be 'all', 'half', "
+                f"or a list of record IDs; got {configured_record_ids!r}"
+            )
+
+        if selected_records.empty:
+            raise ValueError(
+                "No records matched dependency_maps.full_sequence.record_ids: "
+                f"{configured_record_ids!r}"
+            )
+
+        for record in selected_records.itertuples(index=False):
+            record_id = str(record.record_id)
+            sequence_length = len(record.sequence)
+            region_id = f"{record_id}:full_sequence"
+            comparison_id = f"{record_id}__full_sequence"
+
+            if sequence_length <= tile_length:
+                tile_intervals = [(0, sequence_length)]
+            else:
+                tile_intervals = []
+                for tile_start in range(
+                    0,
+                    sequence_length - tile_length + 1,
+                    tile_stride,
+                ):
+                    tile_intervals.append(
+                        (tile_start, tile_start + tile_length)
+                    )
+                final_tile = (
+                    sequence_length - tile_length,
+                    sequence_length,
+                )
+                if tile_intervals[-1] != final_tile:
+                    tile_intervals.append(final_tile)
+
+            for tile_index, (tile_start, tile_end) in enumerate(tile_intervals):
+                positive_map_id = (
+                    f"{record_id}__full_sequence__"
+                    f"tile_{tile_index:03d}__"
+                    f"{tile_start}_{tile_end}"
+                )
+                jobs.append(
+                    {
+                        "map_id": positive_map_id,
+                        "record_id": record_id,
+                        "region_id": region_id,
+                        "label": "full_sequence",
+                        "feature_type": "full_sequence",
+                        "region_start": 0,
+                        "region_end": sequence_length,
+                        "region_length": sequence_length,
+                        "tile_index": tile_index,
+                        "tile_start": tile_start,
+                        "tile_end": tile_end,
+                        "tile_length": tile_end - tile_start,
+                        "long_region_policy": long_region_policy,
+                        "start": tile_start,
+                        "end": tile_end,
+                        "comparison_id": comparison_id,
+                        "map_role": "positive",
+                        "background_index": None,
+                    }
+                )
     else:
         raise ValueError(
             f"Unsupported dependency_maps mode: {mode}; "
-            "expected manual or region"
+            "expected manual, region, or full_sequence"
         )
 
     # Create output directories and package callbacks.

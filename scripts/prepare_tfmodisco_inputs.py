@@ -47,8 +47,8 @@ NUC_TO_IDX = {"A": 0, "C": 1, "G": 2, "T": 3}
 # Feature types that are always kept (never a reason to exclude a span).
 PROMOTER_LABEL = "CompositePromoter"
 
-# motif_only: hard-excluded fine-grained motifs.
-MOTIF_ONLY_EXCLUDE = {"CTCF", "TTF1", "Core"}
+# motif_only: hard-excluded fine-grained motifs and structural coding rRNA genes.
+MOTIF_ONLY_EXCLUDE = {"CTCF", "TTF1", "Core", "18S_rRNA", "28S_rRNA", "5_8S_rRNA"}
 # motif_only optional extra exclusions (CLI-controlled).
 MOTIF_ONLY_OPTIONAL = {"Upstream", "Terminator"}
 
@@ -160,7 +160,12 @@ def overlaps(a0: int, a1: int, b0: int, b1: int) -> bool:
     return a0 < b1 and b0 < a1
 
 
-def excluded_feature_types(mode: str, drop_upstream: bool, drop_terminator: bool):
+def excluded_feature_types(
+    mode: str,
+    drop_upstream: bool,
+    drop_terminator: bool,
+    drop_rrna: bool = True,
+):
     """Return the set of feature types whose overlap excludes a span."""
     if mode == "strict":
         # Everything except the promoter region itself excludes a span.
@@ -168,6 +173,8 @@ def excluded_feature_types(mode: str, drop_upstream: bool, drop_terminator: bool
         return None  # sentinel: "any non-promoter annotation"
     if mode == "motif_only":
         excl = set(MOTIF_ONLY_EXCLUDE)
+        if not drop_rrna:
+            excl.difference_update({"18S_rRNA", "28S_rRNA", "5_8S_rRNA"})
         if drop_upstream:
             excl.add("Upstream")
         if drop_terminator:
@@ -552,7 +559,12 @@ def run_mode(mode: str, args, spans: pd.DataFrame, annotations, cache, record_ti
     losses = LossCounters()
     losses.total_paired_spans = len(spans)
 
-    excl_set = excluded_feature_types(mode, args.exclude_upstream, args.exclude_terminator)
+    excl_set = excluded_feature_types(
+        mode,
+        args.exclude_upstream,
+        args.exclude_terminator,
+        drop_rrna=args.exclude_rrna,
+    )
 
     # 1) annotation exclusion (per span)
     keep_mask = ~spans.apply(
@@ -615,6 +627,7 @@ def run_mode(mode: str, args, spans: pd.DataFrame, annotations, cache, record_ti
         "merge_distance": args.merge_distance,
         "exclude_upstream": args.exclude_upstream,
         "exclude_terminator": args.exclude_terminator,
+        "exclude_rrna": args.exclude_rrna,
     }
     npz_path, meta_path, summary_path = write_outputs(
         args.out_dir, mode, metas, one_hot, contrib, threshold, losses, sanity, params
@@ -659,6 +672,10 @@ def parse_args(argv=None):
                    help="motif_only: also exclude Upstream")
     p.add_argument("--exclude-terminator", action="store_true",
                    help="motif_only: also exclude Terminator")
+    p.add_argument("--exclude-rrna", dest="exclude_rrna", action="store_true", default=True,
+                   help="motif_only: exclude 18S, 28S, and 5.8S rRNA coding regions (default: True)")
+    p.add_argument("--no-exclude-rrna", dest="exclude_rrna", action="store_false",
+                   help="motif_only: do not exclude rRNA coding regions")
     return p.parse_args(argv)
 
 
