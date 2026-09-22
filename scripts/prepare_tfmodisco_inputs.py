@@ -113,6 +113,11 @@ def load_paired_spans(base_run: str, adapted_run: str) -> pd.DataFrame:
 
 def load_annotations(regions_path: str) -> dict:
     """Return record_id -> list of (start, end, feature_type)."""
+    if not os.path.isfile(regions_path):
+        raise FileNotFoundError(
+            f"Expected a .parquet file for --regions, but got '{regions_path}'. "
+            f"Did you mean 'data/prepared/ribosome/regions.parquet'?"
+        )
     reg = pd.read_parquet(regions_path)
     by_record: dict = {}
     for rid, grp in reg.groupby("record_id"):
@@ -424,7 +429,7 @@ def build_window(
 
     dm_b = base_npz["dependency_map"][local : local + L, local : local + L]
     dm_a = adapt_npz["dependency_map"][local : local + L, local : local + L]
-    d_delta = np.maximum(0.0, dm_a - dm_b)
+    d_delta = dm_a - dm_b
 
     s_k = compute_centrality(d_delta).astype(np.float32)
     contribution = oh * s_k[None, :]  # project onto observed nucleotide channel
@@ -503,6 +508,10 @@ def write_outputs(
         one_hot_sequences=one_hot,
         contribution_scores=contrib,
     )
+    ohe_path = os.path.join(out_dir, f"one_hot_{mode_tag}.npz")
+    contrib_path = os.path.join(out_dir, f"attributions_{mode_tag}.npz")
+    np.savez_compressed(ohe_path, one_hot)
+    np.savez_compressed(contrib_path, contrib)
 
     meta_df = pd.DataFrame(metas)
     if not meta_df.empty:
