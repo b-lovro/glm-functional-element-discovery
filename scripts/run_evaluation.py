@@ -46,6 +46,7 @@ def main():
 
     outputs_root = repository_root / run_config["outputs_root"]
     overwrite = bool(run_config["overwrite"])
+    resume = bool(run_config["resume"]) if "resume" in run_config else False
     run_dir = outputs_root / run_config["run_id"]
     model_tasks = [task for task in run_tasks if task in MODEL_TASKS]
     postprocess_only = len(model_tasks) == 0
@@ -58,8 +59,8 @@ def main():
     else:
         # Reserve the output directory before expensive inference and never
         # overwrite an existing run with the same run_id unless overwrite=true
-        # in the config file.
-        run_dir.mkdir(parents=True, exist_ok=overwrite)
+        # or resume=true in the config file.
+        run_dir.mkdir(parents=True, exist_ok=overwrite or resume)
 
     dataset = None
     records = None
@@ -194,6 +195,7 @@ def main():
                 dataset["dataset_id"],
                 model.model_id,
                 overwrite,
+                resume,
             )
             task_results["dependency_maps"] = map_index
         elif task == "block_scores":
@@ -225,6 +227,7 @@ def main():
                 run_config["block_scores"],
                 run_dir,
                 overwrite,
+                resume,
             )
             if plot_results:
                 from glmfe.tasks.plots import plot_block_score_results

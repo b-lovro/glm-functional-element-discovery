@@ -93,6 +93,7 @@ def run_block_scores(
     block_config: dict,
     output_dir: Path,
     overwrite: bool,
+    resume: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Compute block-score tables from saved dependency-map arrays."""
 
@@ -115,7 +116,19 @@ def run_block_scores(
         )
 
     block_dir = output_dir / "block_scores"
-    block_dir.mkdir(exist_ok=overwrite)
+    block_dir.mkdir(parents=True, exist_ok=overwrite or resume)
+
+    per_span_path = block_dir / "per_span.parquet"
+    per_map_path = block_dir / "per_map.parquet"
+    if resume and per_span_path.is_file() and per_map_path.is_file():
+        try:
+            per_span = pd.read_parquet(per_span_path)
+            per_map = pd.read_parquet(per_map_path)
+            print("Block scores: already computed, loaded existing parquet files.")
+            return per_span, per_map
+        except Exception as e:
+            print(f"Warning: Corrupted block score parquet files ({e}), recomputing.")
+
     off_diagonal_mask = ~np.eye(block_size, dtype=bool)
 
     span_rows = []

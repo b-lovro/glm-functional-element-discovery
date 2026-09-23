@@ -192,6 +192,7 @@ def run_dependency_maps(
     dataset_id: str,
     model_id: str,
     overwrite: bool,
+    resume: bool = False,
 ) -> pd.DataFrame:
     """Compute and save configured manual or region dependency maps."""
 
@@ -568,8 +569,8 @@ def run_dependency_maps(
     # Create output directories and package callbacks.
     dependency_dir = output_dir / "dependency_maps"
     maps_dir = dependency_dir / "maps"
-    dependency_dir.mkdir(exist_ok=overwrite)
-    maps_dir.mkdir(exist_ok=overwrite)
+    dependency_dir.mkdir(parents=True, exist_ok=overwrite or resume)
+    maps_dir.mkdir(parents=True, exist_ok=overwrite or resume)
 
     options = DependencyMapOptions(
         dependency_by_masking=dependency_by_masking,
@@ -584,7 +585,8 @@ def run_dependency_maps(
         f"autoregressive={options.autoregressive}, "
         f"dependency_by_masking={dependency_by_masking}, "
         f"with_reconstruction={with_reconstruction}, "
-        f"plot_results={plot_results}"
+        f"plot_results={plot_results}, "
+        f"resume={resume}"
     )
 
     def tokenize_func(sequence: str, mask: int | None) -> object:
@@ -596,8 +598,9 @@ def run_dependency_maps(
     )
 
     rows = []
+    skipped_count = 0
     # Process every job through shared validation, inference, and output logic.
-    for job in tqdm(jobs, desc="Dependency maps", unit="map"):
+    for job in tqdm(jobs, desc="Dependency maps", unit="map", mininterval=5.0):
         map_id = job["map_id"]
         record_id = job["record_id"]
         start = job["start"]
@@ -605,182 +608,209 @@ def run_dependency_maps(
         relative_record_maps_dir = (
             Path("dependency_maps") / "maps" / record_id
         )
-        (output_dir / relative_record_maps_dir).mkdir(exist_ok=True)
-
-        matching_records = records.loc[records["record_id"] == record_id]
-        if len(matching_records) != 1:
-            raise ValueError(
-                f"Dependency map {map_id} requires exactly one record "
-                f"{record_id}, found {len(matching_records)}"
-            )
-
-        sequence = matching_records.iloc[0]["sequence"]
-        sequence_length = len(sequence)
-        if not 0 <= start < end <= sequence_length:
-            raise ValueError(
-                f"Invalid dependency map window {map_id}: "
-                f"[{start}, {end}) for sequence length {sequence_length}"
-            )
-
-        target_length = end - start
-        if context_length is None:
-            window_start = start
-            window_end = end
-            active_subset = None
-        else:
-            window_length = max(context_length, target_length)
-            pad_total = window_length - target_length
-            pad_left = pad_total // 2
-            window_start = max(0, start - pad_left)
-            window_end = min(sequence_length, window_start + window_length)
-
-            actual_window_length = window_end - window_start
-            if actual_window_length < window_length and window_start > 0:
-                window_start = max(0, window_end - window_length)
-
-            active_subset = (start - window_start, end - window_start)
-
-        map_sequence = sequence[window_start:window_end]
-        if len(map_sequence) > model.max_context_length:
-            raise ValueError(
-                f"Dependency map window {map_id} context length "
-                f"{len(map_sequence)} exceeds model context length "
-                f"{model.max_context_length}"
-            )
-
-        job_options = DependencyMapOptions(
-            dependency_by_masking=dependency_by_masking,
-            with_reconstruction=with_reconstruction,
-            autoregressive=bool(
-                getattr(model, "dependency_autoregressive", False)
-            ),
-            subset=active_subset,
-        )
-
-        sample_count = job_options.num_samples(len(map_sequence))
-        tqdm.write(
-            "Computing dependency map "
-            f"{map_id}: record={record_id}, subset=[{start}, {end}), "
-            f"context=[{window_start}, {window_end}), "
-            f"context_length={len(map_sequence)}, samples={sample_count}"
-        )
-
-        # Compute and save raw map arrays.
-        result = DependencyMap.compute_batched(
-            map_sequence,
-            tokenize_func,
-            forward_func,
-            batch_size=batch_size,
-            options=job_options,
-        )
+        (output_dir / relative_record_maps_dir).mkdir(parents=True, exist_ok=True)
 
         relative_map_path = relative_record_maps_dir / f"{map_id}.npz"
         map_path = output_dir / relative_map_path
-        arrays = {
-            "dependency_map": result.dependency_map,
-            "sequence": np.array(list(result.sequence)),
-        }
-        if result.reconstruction is not None:
-            arrays["reconstruction"] = result.reconstruction
-        np.savez_compressed(map_path, **arrays)
+
+        # If resuming, verify if the existing .npz is complete and valid
+        skip_computation = False
+        if resume and map_path.is_file():
+            try:
+                with np.load(map_path, allow_pickle=False) as data:
+                    if "dependency_map" in data and "sequence" in data:
+                        skip_computation = True
+                        skipped_count += 1
+            except Exception as e:
+                tqdm.write(
+                    f"Warning: Corrupted map file {map_path} ({e}), will recompute."
+                )
+                skip_computation = False
+
         relative_html_plot_path = None
         relative_pdf_plot_path = None
-        if plot_results:
-            tqdm.write(f"Writing dependency map plots: {map_id}")
 
-            # Create and save visualizations.
-            relative_html_plot_path = (
-                relative_record_maps_dir / f"{map_id}.html"
-            )
-            relative_pdf_plot_path = (
-                relative_record_maps_dir / f"{map_id}.pdf"
-            )
-            if not hasattr(matplotlib_cm, "get_cmap"):
-                matplotlib_cm.get_cmap = colormaps.get_cmap
-            figure = result.plot()
-            figure.update_traces(
-                colorbar_title_text="Dependency",
-                hovertemplate=(
-                    "Affected position: %{x}<br>"
-                    "Changed position: %{y}<br>"
-                    "Dependency: %{z:.4f}<extra></extra>"
-                ),
-            )
-            if mode == "region" and job["tile_index"] is not None:
-                title = (
-                    f"{map_id}<br>"
-                    f"<sup>{record_id} region "
-                    f"[{job['region_start']}, {job['region_end']}) | "
-                    f"tile {job['tile_index']:03d} [{start}, {end})"
-                    "</sup>"
+        if not skip_computation:
+            matching_records = records.loc[records["record_id"] == record_id]
+            if len(matching_records) != 1:
+                raise ValueError(
+                    f"Dependency map {map_id} requires exactly one record "
+                    f"{record_id}, found {len(matching_records)}"
                 )
+
+            sequence = matching_records.iloc[0]["sequence"]
+            sequence_length = len(sequence)
+            if not 0 <= start < end <= sequence_length:
+                raise ValueError(
+                    f"Invalid dependency map window {map_id}: "
+                    f"[{start}, {end}) for sequence length {sequence_length}"
+                )
+
+            target_length = end - start
+            if context_length is None:
+                window_start = start
+                window_end = end
+                active_subset = None
             else:
-                title = (
-                    f"{map_id}<br>"
-                    f"<sup>{record_id} [{start}, {end})</sup>"
+                window_length = max(context_length, target_length)
+                pad_total = window_length - target_length
+                pad_left = pad_total // 2
+                window_start = max(0, start - pad_left)
+                window_end = min(sequence_length, window_start + window_length)
+
+                actual_window_length = window_end - window_start
+                if actual_window_length < window_length and window_start > 0:
+                    window_start = max(0, window_end - window_length)
+
+                active_subset = (start - window_start, end - window_start)
+
+            map_sequence = sequence[window_start:window_end]
+            if len(map_sequence) > model.max_context_length:
+                raise ValueError(
+                    f"Dependency map window {map_id} context length "
+                    f"{len(map_sequence)} exceeds model context length "
+                    f"{model.max_context_length}"
                 )
-            figure.update_layout(
-                title=title,
-                margin={"l": 80, "r": 80, "t": 180, "b": 80},
-            )
-            window_left = start / sequence_length
-            window_right = end / sequence_length
-            context_left = window_start / sequence_length
-            context_right = window_end / sequence_length
-            figure.add_shape(
-                type="rect",
-                x0=0,
-                x1=1,
-                y0=1.08,
-                y1=1.12,
-                xref="paper",
-                yref="paper",
-                fillcolor="#e5e7eb",
-                line={"color": "#9ca3af", "width": 1},
-            )
-            figure.add_shape(
-                type="rect",
-                x0=context_left,
-                x1=context_right,
-                y0=1.08,
-                y1=1.12,
-                xref="paper",
-                yref="paper",
-                fillcolor="#93c5fd",
-                line={"color": "#60a5fa", "width": 1},
-            )
-            figure.add_shape(
-                type="rect",
-                x0=window_left,
-                x1=window_right,
-                y0=1.08,
-                y1=1.12,
-                xref="paper",
-                yref="paper",
-                fillcolor="#2563eb",
-                line={"color": "#1d4ed8", "width": 1},
-            )
-            figure.add_annotation(
-                x=0.5,
-                y=1.15,
-                xref="paper",
-                yref="paper",
-                text=(
-                    f"Full record: {sequence_length} nt | context window: "
-                    f"[{window_start}, {window_end}) | active subset: "
-                    f"[{start}, {end}) ({end - start} nt)"
+
+            job_options = DependencyMapOptions(
+                dependency_by_masking=dependency_by_masking,
+                with_reconstruction=with_reconstruction,
+                autoregressive=bool(
+                    getattr(model, "dependency_autoregressive", False)
                 ),
-                showarrow=False,
+                subset=active_subset,
             )
-            figure.write_html(
-                output_dir / relative_html_plot_path,
-                include_plotlyjs=True,
+
+            sample_count = job_options.num_samples(len(map_sequence))
+            tqdm.write(
+                "Computing dependency map "
+                f"{map_id}: record={record_id}, subset=[{start}, {end}), "
+                f"context=[{window_start}, {window_end}), "
+                f"context_length={len(map_sequence)}, samples={sample_count}"
             )
-            figure.write_image(
-                output_dir / relative_pdf_plot_path,
-                format="pdf",
+
+            # Compute and save raw map arrays.
+            # Disable inner progress bar to prevent stdout flooding on distributed filesystems (Ceph/NFS).
+            result = DependencyMap.compute_batched(
+                map_sequence,
+                tokenize_func,
+                forward_func,
+                batch_size=batch_size,
+                enable_progress_bar=False,
+                options=job_options,
             )
-        tqdm.write(f"Finished dependency map: {map_id}")
+
+            arrays = {
+                "dependency_map": result.dependency_map,
+                "sequence": np.array(list(result.sequence)),
+            }
+            if result.reconstruction is not None:
+                arrays["reconstruction"] = result.reconstruction
+            np.savez_compressed(map_path, **arrays)
+            if plot_results:
+                tqdm.write(f"Writing dependency map plots: {map_id}")
+
+                # Create and save visualizations.
+                relative_html_plot_path = (
+                    relative_record_maps_dir / f"{map_id}.html"
+                )
+                relative_pdf_plot_path = (
+                    relative_record_maps_dir / f"{map_id}.pdf"
+                )
+                if not hasattr(matplotlib_cm, "get_cmap"):
+                    matplotlib_cm.get_cmap = colormaps.get_cmap
+                figure = result.plot()
+                figure.update_traces(
+                    colorbar_title_text="Dependency",
+                    hovertemplate=(
+                        "Affected position: %{x}<br>"
+                        "Changed position: %{y}<br>"
+                        "Dependency: %{z:.4f}<extra></extra>"
+                    ),
+                )
+                if mode == "region" and job["tile_index"] is not None:
+                    title = (
+                        f"{map_id}<br>"
+                        f"<sup>{record_id} region "
+                        f"[{job['region_start']}, {job['region_end']}) | "
+                        f"tile {job['tile_index']:03d} [{start}, {end})"
+                        "</sup>"
+                    )
+                else:
+                    title = (
+                        f"{map_id}<br>"
+                        f"<sup>{record_id} [{start}, {end})</sup>"
+                    )
+                figure.update_layout(
+                    title=title,
+                    margin={"l": 80, "r": 80, "t": 180, "b": 80},
+                )
+                window_left = start / sequence_length
+                window_right = end / sequence_length
+                context_left = window_start / sequence_length
+                context_right = window_end / sequence_length
+                figure.add_shape(
+                    type="rect",
+                    x0=0,
+                    x1=1,
+                    y0=1.08,
+                    y1=1.12,
+                    xref="paper",
+                    yref="paper",
+                    fillcolor="#e5e7eb",
+                    line={"color": "#9ca3af", "width": 1},
+                )
+                figure.add_shape(
+                    type="rect",
+                    x0=context_left,
+                    x1=context_right,
+                    y0=1.08,
+                    y1=1.12,
+                    xref="paper",
+                    yref="paper",
+                    fillcolor="#93c5fd",
+                    line={"color": "#60a5fa", "width": 1},
+                )
+                figure.add_shape(
+                    type="rect",
+                    x0=window_left,
+                    x1=window_right,
+                    y0=1.08,
+                    y1=1.12,
+                    xref="paper",
+                    yref="paper",
+                    fillcolor="#2563eb",
+                    line={"color": "#1d4ed8", "width": 1},
+                )
+                figure.add_annotation(
+                    x=0.5,
+                    y=1.15,
+                    xref="paper",
+                    yref="paper",
+                    text=(
+                        f"Full record: {sequence_length} nt | context window: "
+                        f"[{window_start}, {window_end}) | active subset: "
+                        f"[{start}, {end}) ({end - start} nt)"
+                    ),
+                    showarrow=False,
+                )
+                figure.write_html(
+                    output_dir / relative_html_plot_path,
+                    include_plotlyjs=True,
+                )
+                figure.write_image(
+                    output_dir / relative_pdf_plot_path,
+                    format="pdf",
+                )
+            tqdm.write(f"Finished dependency map: {map_id}")
+        else:
+            if plot_results:
+                candidate_html = relative_record_maps_dir / f"{map_id}.html"
+                candidate_pdf = relative_record_maps_dir / f"{map_id}.pdf"
+                if (output_dir / candidate_html).is_file():
+                    relative_html_plot_path = candidate_html
+                if (output_dir / candidate_pdf).is_file():
+                    relative_pdf_plot_path = candidate_pdf
 
         rows.append(
             {
@@ -822,6 +852,16 @@ def run_dependency_maps(
                 ),
             }
         )
+
+        if (len(rows) % 50 == 0) or (len(rows) == len(jobs)):
+            pd.DataFrame(rows, columns=_MAP_INDEX_COLUMNS).to_parquet(
+                dependency_dir / "map_index.parquet",
+                index=False,
+                engine="pyarrow",
+            )
+
+    if skipped_count > 0:
+        print(f"Dependency maps: skipped {skipped_count} already computed map(s).")
 
     # Write the map-index table.
     map_index = pd.DataFrame(rows, columns=_MAP_INDEX_COLUMNS)
