@@ -12,7 +12,7 @@ Pipeline (see feasibility_report_tfmodisco.md):
   1. Load base/adapted block_scores/per_span.parquet and pair spans on
      (record_id, region_id, tile_index, span_start, span_end).
   2. B_delta = max(0, block_score_adapted - block_score_base).
-  3. Filter spans by annotation-exclusion mode (strict | motif_only).
+  3. Filter spans by annotation-exclusion mode (strict | motif_only | no_holdout).
   4. Deduplicate identical record-relative spans across overlapping tiles
      (keep the highest B_delta occurrence).
   5. Select top-X% B_delta spans, merge nearby survivors, keep one local max
@@ -172,6 +172,8 @@ def excluded_feature_types(
     drop_rrna: bool = True,
 ):
     """Return the set of feature types whose overlap excludes a span."""
+    if mode == "no_holdout":
+        return set()
     if mode == "strict":
         # Everything except the promoter region itself excludes a span.
         # (Resolved lazily against whatever annotations exist per record.)
@@ -196,6 +198,8 @@ def span_is_excluded(
     excl_set,
 ) -> bool:
     """True if the span overlaps a feature type that the mode excludes."""
+    if excl_set is not None and len(excl_set) == 0:
+        return False
     for a0, a1, ft in annotations.get(record_id, ()):
         if not overlaps(start, end, a0, a1):
             continue
@@ -502,21 +506,21 @@ def write_outputs(
 ):
     os.makedirs(out_dir, exist_ok=True)
 
-    npz_path = os.path.join(out_dir, f"high_score_windows_{mode_tag}.npz")
+    npz_path = os.path.join(out_dir, "high_score_windows.npz")
     np.savez_compressed(
         npz_path,
         one_hot_sequences=one_hot,
         contribution_scores=contrib,
     )
-    ohe_path = os.path.join(out_dir, f"one_hot_{mode_tag}.npz")
-    contrib_path = os.path.join(out_dir, f"attributions_{mode_tag}.npz")
+    ohe_path = os.path.join(out_dir, "one_hot.npz")
+    contrib_path = os.path.join(out_dir, "attributions.npz")
     np.savez_compressed(ohe_path, one_hot)
     np.savez_compressed(contrib_path, contrib)
 
     meta_df = pd.DataFrame(metas)
     if not meta_df.empty:
         meta_df["exclusion_mode"] = mode_tag
-    meta_path = os.path.join(out_dir, f"candidate_metadata_{mode_tag}.parquet")
+    meta_path = os.path.join(out_dir, "candidate_metadata.parquet")
     meta_df.to_parquet(meta_path, index=False)
 
     # summary
@@ -529,7 +533,7 @@ def write_outputs(
             for ft in filter(None, s.split(",")):
                 ann_counter[ft] += 1
 
-    summary_path = os.path.join(out_dir, f"candidate_summary_{mode_tag}.tsv")
+    summary_path = os.path.join(out_dir, "candidate_summary.tsv")
     with open(summary_path, "w") as fh:
         fh.write("metric\tvalue\n")
         fh.write(f"exclusion_mode\t{mode_tag}\n")
@@ -576,15 +580,20 @@ def run_mode(mode: str, args, spans: pd.DataFrame, annotations, cache, record_ti
     )
 
     # 1) annotation exclusion (per span)
-    keep_mask = ~spans.apply(
-        lambda r: span_is_excluded(
-            r["record_id"], r["span_start"], r["span_end"], annotations, excl_set
-        ),
-        axis=1,
-    )
-    kept = spans[keep_mask].copy()
-    losses.excluded_by_annotation = len(spans) - len(kept)
-    print(f"  spans after annotation exclusion: {len(kept)} / {len(spans)}")
+    if excl_set is not None and len(excl_set) == 0:
+        kept = spans.copy()
+        losses.excluded_by_annotation = 0
+        print(f"  spans after annotation exclusion: {len(kept)} / {len(spans)} (no holdout)")
+    else:
+        keep_mask = ~spans.apply(
+            lambda r: span_is_excluded(
+                r["record_id"], r["span_start"], r["span_end"], annotations, excl_set
+            ),
+            axis=1,
+        )
+        kept = spans[keep_mask].copy()
+        losses.excluded_by_annotation = len(spans) - len(kept)
+        print(f"  spans after annotation exclusion: {len(kept)} / {len(spans)}")
 
     # 2) dedup overlapping tile spans
     kept = dedupe_spans(kept, losses)
@@ -664,7 +673,8 @@ def parse_args(argv=None):
     p.add_argument("--adapted-run", default="outputs/runs/adapted_promotor")
     p.add_argument("--regions", default="data/prepared/ribosome/regions.parquet")
     p.add_argument("--out-dir", default="outputs/tfmodisco_inputs")
-    p.add_argument("--mode", choices=["strict", "motif_only", "both"], default="both")
+    p.add_argument("--mode", choices=["strict", "motif_only", "no_holdout"], default="motif_only",
+                   help="annotation exclusion mode: strict, motif_only (default), or no_holdout")
     p.add_argument("--top-pct", type=float, default=1.0,
                    help="keep top X%% of B_delta spans (default 1.0)")
     p.add_argument("--window", type=int, default=100, help="window length L (default 100)")
@@ -704,9 +714,7 @@ def main(argv=None):
     record_tiles = load_record_tiles(args.base_run)
     cache = NpzCache(base_paths, adapt_paths)
 
-    modes = ["strict", "motif_only"] if args.mode == "both" else [args.mode]
-    for mode in modes:
-        run_mode(mode, args, spans, annotations, cache, record_tiles, base_paths)
+    run_mode(args.mode, args, spans, annotations, cache, record_tiles, base_paths)
 
     print("\nDone. TF-MoDISco was NOT run (input preparation only).")
 
