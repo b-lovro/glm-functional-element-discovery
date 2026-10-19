@@ -393,6 +393,59 @@ a directory named by `run_id`.
   annotation, while `tile_start` and `tile_end` describe the sequence used for
   the individual map.
 
+## Run TF-MoDIsco
+
+```bash
+python scripts/prepare_tfmodisco_inputs.py \
+  --base-run outputs/runs/rinalmo_tfmodisco_full_test \
+  --adapted-run outputs/runs/rinalmo_tfmodisco_pre_full_test \
+  --regions data/prepared/ribosome/regions.parquet \
+  --out-dir outputs/tfmodisco_inputs/full \
+  --mode motif_only \
+  --top-pct 20.0 \
+  --window 400 \
+  --emit dense
+```
+
+```bash
+modisco motifs \
+  -s outputs/tfmodisco_inputs/full/one_hot.npz \
+  -a outputs/tfmodisco_inputs/full/attributions.npz \
+  -n 2000 \
+  -o outputs/tfmodisco_runs/full/results.h5 \
+  --size 18
+```
+
+```bash
+modisco report \
+  -i outputs/tfmodisco_runs/full/results.h5 \
+  -o outputs/tfmodisco_runs/full/report \
+  -s outputs/tfmodisco_runs/full/report/ \
+  -m resources/motif_databases/JASPAR2026_CORE_vertebrates_nonredundant.meme \
+  -l
+```
+
+Run the report over all databases independently.
+
+```bash
+python scripts/map_motifs_to_regions.py \
+--results outputs/tfmodisco_runs/full_tuned_0/motif_only_results.h5 \
+--metadata outputs/tfmodisco_inputs/full_no_holdout/candidate_metadata.parquet \
+--regions data/prepared/ribosome/regions.parquet \
+--output outputs/tfmodisco_runs/full_tuned_0/
+
+python scripts/classify_motif_matches.py \
+--input-dir outputs/tfmodisco_runs/full_tuned_0/ --ranking-mode percentile --min-percentile 70.0
+
+python scripts/diagnose_motif_plateaus.py \
+--modisco-h5 outputs/tfmodisco_runs/full_tuned_0/motif_only_results.h5 \
+--output-dir outputs/tfmodisco_runs/full_tuned_0/plateau_diagnostics
+
+python scripts/run_fimo_full_dataset.py \
+--modisco-h5 outputs/tfmodisco_runs/full_tuned_0/motif_only_results.h5 \
+--output-dir outputs/tfmodisco_runs/full_tuned_0/fimo_diagnostics
+```
+
 ## Common problems
 
 ### Missing RiNALMo checkpoint
