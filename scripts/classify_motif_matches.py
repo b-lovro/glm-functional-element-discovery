@@ -485,7 +485,7 @@ def print_classification_summary(
     print("\n" + "=" * 80 + "\n")
 
 
-def clean_match_name(raw: str, max_len: int = 18) -> str:
+def clean_match_name(raw: str, max_len: int = 24) -> str:
     """Format and shorten database match identifier for display in table cells."""
     if pd.isna(raw) or not raw or str(raw).lower() in ("nan", "none"):
         return "-"
@@ -498,7 +498,9 @@ def clean_match_name(raw: str, max_len: int = 18) -> str:
         s = s.split(" ", 1)[1]
     elif s.startswith("DF") and " " in s:
         s = s.split(" ", 1)[1].rsplit("_", 1)[0]
-    elif len(s) > max_len:
+        if s.startswith("COMP-subunit_"):
+            s = s.replace("COMP-subunit_", "COMP_")
+    if len(s) > max_len:
         s = s[: max_len - 2] + ".."
     return s
 
@@ -514,6 +516,13 @@ def format_pval(p: float) -> str:
     return f"p={mantissa:.1f}e{exponent}"
 
 
+def format_pattern_display_name(name: str) -> str:
+    """Format pattern identifier cleanly, preserving neg_ prefix if from neg_patterns."""
+    if name.startswith("neg_patterns."):
+        return f"neg_{name.split('.')[-1]}"
+    return name.replace("pos_patterns.", "")
+
+
 def plot_pattern_classification_table(
     df: pd.DataFrame,
     output_png: Path,
@@ -521,8 +530,9 @@ def plot_pattern_classification_table(
 ) -> None:
     """Render a clean, uncolored publication table of pattern classifications and database hits."""
     df = df.copy()
-    df["pat_num"] = df["pattern"].apply(lambda p: int(p.split("_")[-1]))
-    df = df.sort_values("pat_num").reset_index(drop=True)
+    df["is_neg"] = df["pattern"].apply(lambda p: 1 if str(p).startswith("neg_") else 0)
+    df["pat_num"] = df["pattern"].apply(lambda p: int(str(p).split("_")[-1]))
+    df = df.sort_values(["is_neg", "pat_num"]).reset_index(drop=True)
 
     num_patterns = len(df)
     columns = [
@@ -549,11 +559,12 @@ def plot_pattern_classification_table(
                 pct_text = f"({pct:.1f}%)" if pd.notna(pct) else ""
                 annot_mat[i, j + 1] = f"{match_str}\n{p_text} {pct_text}".strip()
 
-    fig, ax = plt.subplots(figsize=(14.5, 9.5), dpi=dpi)
+    fig_height = max(9.5, 0.46 * num_patterns + 2.2)
+    fig, ax = plt.subplots(figsize=(15.5, fig_height), dpi=dpi)
     cmap_white = ListedColormap(["#ffffff"])
 
     y_labels = [
-        f"{row['pattern'].replace('pos_patterns.', '')} (N={row['num_seqlets']})"
+        f"{format_pattern_display_name(str(row['pattern']))} (N={row['num_seqlets']})"
         for _, row in df.iterrows()
     ]
 
@@ -566,21 +577,28 @@ def plot_pattern_classification_table(
         linecolor="#d0d0d0",
         annot=annot_mat,
         fmt="",
-        annot_kws={"fontsize": 8.5, "weight": "bold", "color": "#111111"},
+        annot_kws={"fontsize": 8.0, "weight": "bold", "color": "#111111"},
         yticklabels=y_labels,
         xticklabels=columns,
     )
     ax.set_xticklabels(columns, rotation=0, ha="center", fontsize=10, fontweight="bold")
-    ax.tick_params(axis="y", labelsize=10)
+    ax.tick_params(axis="y", labelsize=9.5)
     for label in ax.get_yticklabels():
         label.set_fontweight("bold")
     ax.set_ylabel("")
 
+    if num_patterns > 25:
+        secax = ax.secondary_xaxis("top")
+        secax.set_xticks(np.arange(len(columns)) + 0.5)
+        secax.set_xticklabels(columns, rotation=0, ha="center", fontsize=10, fontweight="bold")
+
+    top_edge = ax.get_position().y1
+    title_y = top_edge + (0.75 / fig_height) if num_patterns > 25 else 0.985
     fig.suptitle(
         "TF-MoDISco Pattern Classification & Reference Database Matches",
         fontsize=13,
         fontweight="bold",
-        y=0.985,
+        y=title_y,
     )
 
     output_png.parent.mkdir(parents=True, exist_ok=True)

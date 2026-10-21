@@ -235,7 +235,8 @@ def plot_summary_overview_grid(
     cols = 3
     rows = math.ceil(num_patterns / float(cols))
 
-    fig, axes = plt.subplots(rows, cols, figsize=(16, 3.2 * rows), dpi=dpi)
+    fig_height = 3.2 * rows
+    fig, axes = plt.subplots(rows, cols, figsize=(16, fig_height), dpi=dpi)
     axes_flat = axes.flatten()
 
     for idx, data in enumerate(records):
@@ -278,7 +279,7 @@ def plot_summary_overview_grid(
         "TF-MoDISco Patterns: CWM Attribution Profiles & Plateau Diagnostics",
         fontsize=16,
         fontweight="bold",
-        y=0.995,
+        y=1.0 + (0.35 / fig_height),
     )
     plt.tight_layout()
     plt.savefig(output_png, bbox_inches="tight")

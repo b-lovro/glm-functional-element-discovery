@@ -98,10 +98,18 @@ COMP_DISPLAY_NAMES: List[str] = [
 ]
 
 
-def pattern_sort_key(name: str) -> int:
-    """Extract integer pattern index for numerical sorting (e.g. pattern_0 -> 0)."""
+def pattern_sort_key(name: str) -> Tuple[int, int]:
+    """Extract (is_neg, pattern_index) for numerical sorting (pos_patterns first, then neg_patterns)."""
+    is_neg = 1 if name.startswith("neg_") else 0
     parts = name.split(".")[-1].split("_")
-    return int(parts[-1])
+    return (is_neg, int(parts[-1]))
+
+
+def format_pattern_display_name(name: str) -> str:
+    """Format pattern identifier cleanly, preserving neg_ prefix if from neg_patterns."""
+    if name.startswith("neg_patterns."):
+        return f"neg_{name.split('.')[-1]}"
+    return name.split(".")[-1]
 
 
 def load_annotations(
@@ -412,27 +420,32 @@ def plot_seqlet_fold_enrichment_heatmap(
 ) -> None:
     """Regional Fold-Enrichment Heatmap with integrated Seqlet Counts per Pattern."""
     pattern_order = fe_mat.index.tolist()
-    display_names = [p.split(".")[-1] for p in pattern_order]
+    num_patterns = len(pattern_order)
+    display_names = [format_pattern_display_name(p) for p in pattern_order]
     summary_sorted = summary_df.set_index("pattern_name").loc[pattern_order].reset_index()
 
-    fig = plt.figure(figsize=(14, 9), dpi=300)
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1.2, 4.8], wspace=0.08)
+    fig_height = max(9.0, 0.36 * num_patterns + 2.2)
+    cbar_shrink = min(0.8, 10.0 / fig_height)
+
+    fig = plt.figure(figsize=(15, fig_height), dpi=300)
+    gs = gridspec.GridSpec(1, 2, width_ratios=[1.3, 4.7], wspace=0.08)
 
     ax_cnt = fig.add_subplot(gs[0])
     ax_hm = fig.add_subplot(gs[1])
 
-    y_pos = np.arange(len(pattern_order))
+    y_pos = np.arange(num_patterns)
     seq_cnt = summary_sorted["total_seqlets"].values
     rec_cnt = summary_sorted["num_records"].values
 
     ax_cnt.barh(y_pos, seq_cnt, color="#2c7bb6", alpha=0.88, height=0.75, edgecolor="#222222", linewidth=0.6)
     max_cnt = max(seq_cnt) if len(seq_cnt) > 0 else 50
-    ax_cnt.set_xlim(0, max_cnt * 1.35)
-    ax_cnt.set_ylim(-0.5, len(pattern_order) - 0.5)
+    ax_cnt.set_xlim(0, max_cnt * 1.38)
+    ax_cnt.set_ylim(-0.5, num_patterns - 0.5)
     ax_cnt.invert_yaxis()
     ax_cnt.set_yticks(y_pos)
-    ax_cnt.set_yticklabels(display_names, fontsize=10, fontweight="bold")
+    ax_cnt.set_yticklabels(display_names, fontsize=9.5, fontweight="bold")
     ax_cnt.set_xlabel("Seqlet Count\n[Contributing Records]", fontsize=9.5, fontweight="bold")
+    ax_cnt.tick_params(axis="x", top=True, labeltop=True, bottom=True, labelbottom=True, labelsize=8.5)
     ax_cnt.grid(axis="x", linestyle="--", alpha=0.5)
 
     for i, (sc, rc) in enumerate(zip(seq_cnt, rec_cnt)):
@@ -457,8 +470,12 @@ def plot_seqlet_fold_enrichment_heatmap(
         vmax=4.0,
         annot=True,
         fmt=".1f",
-        annot_kws={"fontsize": 9, "weight": "bold"},
-        cbar_kws={"label": "$\\log_2(\\mathrm{Observed} / \\mathrm{Expected})$ Fold-Enrichment", "shrink": 0.8},
+        annot_kws={"fontsize": 8.5, "weight": "bold"},
+        cbar_kws={
+            "label": "$\\log_2(\\mathrm{Observed} / \\mathrm{Expected})$ Fold-Enrichment",
+            "shrink": cbar_shrink,
+            "aspect": 25,
+        },
         linewidths=0.6,
         linecolor="#dddddd",
         yticklabels=False,
@@ -466,12 +483,19 @@ def plot_seqlet_fold_enrichment_heatmap(
     ax_hm.set_xticklabels(comp_display_names, rotation=30, ha="right", fontsize=9.5, fontweight="bold")
     ax_hm.set_ylabel("")
 
+    if num_patterns > 25:
+        secax = ax_hm.secondary_xaxis("top")
+        secax.set_xticks(np.arange(len(comp_display_names)) + 0.5)
+        secax.set_xticklabels(comp_display_names, rotation=30, ha="left", fontsize=9.5, fontweight="bold")
+
+    top_edge = ax_hm.get_position().y1
+    title_y = top_edge + (1.45 / fig_height) if num_patterns > 25 else 0.98
     fig.suptitle(
         "TF-MoDISco Seqlet Regional Fold-Enrichment & Compartment Distribution\n"
         "[Left: Seqlet Counts & Contributing Records | Right: Fold-Enrichment relative to Candidate Attribution Windows (Search Space)]",
         fontsize=12,
         fontweight="bold",
-        y=0.98,
+        y=title_y,
     )
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
@@ -488,11 +512,12 @@ def plot_seqlet_counts_percentages_table(
 ) -> None:
     """Regional Counts & Percentages Heatmap Table with integrated Total Seqlets per Pattern."""
     pattern_order = summary_df["pattern_name"].tolist()
-    display_names = [p.split(".")[-1] for p in pattern_order]
+    num_patterns = len(pattern_order)
+    display_names = [format_pattern_display_name(p) for p in pattern_order]
     summary_sorted = summary_df.set_index("pattern_name").loc[pattern_order].reset_index()
 
     pct_mat = pd.DataFrame(index=pattern_order, columns=comp_labels, dtype=float)
-    annot_mat = np.empty((len(pattern_order), len(comp_labels)), dtype=object)
+    annot_mat = np.empty((num_patterns, len(comp_labels)), dtype=object)
 
     for i, pat in enumerate(pattern_order):
         row = summary_sorted[summary_sorted["pattern_name"] == pat].iloc[0]
@@ -502,24 +527,28 @@ def plot_seqlet_counts_percentages_table(
             pct_mat.loc[pat, c] = pct
             annot_mat[i, j] = f"{cnt} ({pct:.1f}%)"
 
-    fig = plt.figure(figsize=(14, 9), dpi=300)
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1.2, 4.8], wspace=0.08)
+    fig_height = max(9.0, 0.36 * num_patterns + 2.2)
+    cbar_shrink = min(0.8, 10.0 / fig_height)
+
+    fig = plt.figure(figsize=(15, fig_height), dpi=300)
+    gs = gridspec.GridSpec(1, 2, width_ratios=[1.3, 4.7], wspace=0.08)
 
     ax_cnt = fig.add_subplot(gs[0])
     ax_hm = fig.add_subplot(gs[1])
 
-    y_pos = np.arange(len(pattern_order))
+    y_pos = np.arange(num_patterns)
     seq_cnt = summary_sorted["total_seqlets"].values
     rec_cnt = summary_sorted["num_records"].values
 
     ax_cnt.barh(y_pos, seq_cnt, color="#2c7bb6", alpha=0.88, height=0.75, edgecolor="#222222", linewidth=0.6)
     max_cnt = max(seq_cnt) if len(seq_cnt) > 0 else 50
-    ax_cnt.set_xlim(0, max_cnt * 1.35)
-    ax_cnt.set_ylim(-0.5, len(pattern_order) - 0.5)
+    ax_cnt.set_xlim(0, max_cnt * 1.38)
+    ax_cnt.set_ylim(-0.5, num_patterns - 0.5)
     ax_cnt.invert_yaxis()
     ax_cnt.set_yticks(y_pos)
-    ax_cnt.set_yticklabels(display_names, fontsize=10, fontweight="bold")
+    ax_cnt.set_yticklabels(display_names, fontsize=9.5, fontweight="bold")
     ax_cnt.set_xlabel("Seqlet Count\n[Contributing Records]", fontsize=9.5, fontweight="bold")
+    ax_cnt.tick_params(axis="x", top=True, labeltop=True, bottom=True, labelbottom=True, labelsize=8.5)
     ax_cnt.grid(axis="x", linestyle="--", alpha=0.5)
 
     for i, (sc, rc) in enumerate(zip(seq_cnt, rec_cnt)):
@@ -543,8 +572,12 @@ def plot_seqlet_counts_percentages_table(
         vmax=65.0,
         annot=annot_mat,
         fmt="",
-        annot_kws={"fontsize": 8.5, "weight": "bold"},
-        cbar_kws={"label": "Seqlet Percentage in Compartment (%)", "shrink": 0.8},
+        annot_kws={"fontsize": 8.0, "weight": "bold"},
+        cbar_kws={
+            "label": "Seqlet Percentage in Compartment (%)",
+            "shrink": cbar_shrink,
+            "aspect": 25,
+        },
         linewidths=0.6,
         linecolor="#dddddd",
         yticklabels=False,
@@ -552,12 +585,19 @@ def plot_seqlet_counts_percentages_table(
     ax_hm.set_xticklabels(comp_display_names, rotation=30, ha="right", fontsize=9.5, fontweight="bold")
     ax_hm.set_ylabel("")
 
+    if num_patterns > 25:
+        secax = ax_hm.secondary_xaxis("top")
+        secax.set_xticks(np.arange(len(comp_display_names)) + 0.5)
+        secax.set_xticklabels(comp_display_names, rotation=30, ha="left", fontsize=9.5, fontweight="bold")
+
+    top_edge = ax_hm.get_position().y1
+    title_y = top_edge + (1.45 / fig_height) if num_patterns > 25 else 0.98
     fig.suptitle(
         "TF-MoDISco Seqlet Compartment Breakdown: Counts & Percentages\n"
         "[Left: Total Pattern Seqlets & Records | Right: Seqlet Count & Percentage (%) per Biological Compartment]",
         fontsize=12,
         fontweight="bold",
-        y=0.98,
+        y=title_y,
     )
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
@@ -593,11 +633,12 @@ def plot_seqlet_annotations_overlap_table(
             else:
                 annot_mat[i, j] = f"{cnt}\n({pct:.1f}%)"
 
-    fig, ax = plt.subplots(figsize=(15.5, 9.5), dpi=dpi)
+    fig_height = max(9.5, 0.45 * num_patterns + 2.2)
+    fig, ax = plt.subplots(figsize=(15.5, fig_height), dpi=dpi)
     cmap_white = ListedColormap(["#ffffff"])
 
     y_labels = [
-        f"{row['pattern_name'].split('.')[-1]} (N={int(row['total_pattern_seqlets'])})"
+        f"{format_pattern_display_name(str(row['pattern_name']))} (N={int(row['total_pattern_seqlets'])})"
         for _, row in df.iterrows()
     ]
 
@@ -615,16 +656,23 @@ def plot_seqlet_annotations_overlap_table(
         xticklabels=exact_annots,
     )
     ax.set_xticklabels(exact_annots, rotation=25, ha="right", fontsize=9.5, fontweight="bold")
-    ax.tick_params(axis="y", labelsize=10)
+    ax.tick_params(axis="y", labelsize=9.5)
     for label in ax.get_yticklabels():
         label.set_fontweight("bold")
     ax.set_ylabel("")
 
+    if num_patterns > 25:
+        secax = ax.secondary_xaxis("top")
+        secax.set_xticks(np.arange(len(exact_annots)) + 0.5)
+        secax.set_xticklabels(exact_annots, rotation=25, ha="left", fontsize=9.5, fontweight="bold")
+
+    top_edge = ax.get_position().y1
+    title_y = top_edge + (1.15 / fig_height) if num_patterns > 25 else 0.985
     fig.suptitle(
         "TF-MoDISco Seqlet Overlap with Ground-Truth rDNA Functional Annotations",
         fontsize=13,
         fontweight="bold",
-        y=0.985,
+        y=title_y,
     )
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
