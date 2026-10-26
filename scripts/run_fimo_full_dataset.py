@@ -7,7 +7,7 @@ across all 156 mammalian rDNA genomes for de novo TF-MoDISco patterns, featuring
 
 1. Core Motif Trimming:
    Trims each 50 bp TF-MoDISco pattern to its core attribution peak using the smoothed
-   CWM attribution thresholding logic (smoothed attribution >= 0.50 * peak) from
+   CWM attribution thresholding logic (smoothed attribution >= 0.65 * peak) from
    diagnose_motif_plateaus.py.
 2. Local Sliding-Window Background Calibration:
    Calculates position-specific nucleotide frequencies across each genome via a sliding
@@ -27,10 +27,10 @@ Outputs saved to <modisco_parent>/fimo_diagnostics/:
 - fimo_fdr_summary.tsv
 - fimo_all_hits_annotated.parquet
 - fimo_conservation_summary.tsv
-- regional_fold_enrichment_heatmap.png
-- regional_counts_percentages_table.png
-- promoter_terminator_spatial_metaprofile.png
-- its2_subdomain_architecture.png
+- fimo_vs_modisco_comparison.tsv
+- fimo_vs_modisco_attribution_comparison.png
+- fimo_active_vs_silent_attribution.tsv
+- fimo_active_vs_silent_attribution_distribution.png
 """
 
 from __future__ import annotations
@@ -57,6 +57,7 @@ import numba
 import numpy as np
 import pandas as pd
 import pyfaidx
+from scipy.stats import mannwhitneyu
 import seaborn as sns
 
 
@@ -73,9 +74,18 @@ def set_global_seed(seed: int) -> None:
         pass
 
 
-def pattern_sort_key(name: str) -> int:
-    """Extracts integer index from 'pattern_X' for natural sorting."""
-    return int(name.split("_")[1])
+def pattern_sort_key(name: str) -> Tuple[int, int]:
+    """Extracts (is_neg, pattern_index) for numerical sorting (pos_patterns first, then neg_patterns)."""
+    is_neg = 1 if name.startswith("neg_") else 0
+    parts = name.split(".")[-1].split("_")
+    return (is_neg, int(parts[-1]))
+
+
+def format_pattern_display_name(name: str) -> str:
+    """Format pattern identifier cleanly, preserving neg_ prefix if from neg_patterns."""
+    if name.startswith("neg_patterns."):
+        return f"neg_{name.split('.')[-1]}"
+    return name.split(".")[-1]
 
 
 def dinucleotide_shuffle_exact(seq: str, rng: random.Random) -> str:
@@ -169,10 +179,10 @@ def dinucleotide_shuffle_exact(seq: str, rng: random.Random) -> str:
 
 def load_and_trim_modisco_pwms(
     h5_path: Path,
-    plateau_ratio: float = 0.50,
+    plateau_ratio: float = 0.65,
     min_core_len: int = 6,
 ) -> Tuple[Dict[str, np.ndarray], Dict[str, str], pd.DataFrame]:
-    """Loads all discovered PWMs from HDF5 pos_patterns group and trims each to its CWM core.
+    """Loads all discovered PWMs from HDF5 pos_patterns and neg_patterns groups and trims each to its CWM core.
 
     Trimming logic matches scripts/diagnose_motif_plateaus.py:
     1. Computes per-position attribution magnitude max_b(|contrib_scores[i, b]|).
@@ -181,7 +191,7 @@ def load_and_trim_modisco_pwms(
     4. Slices PWM to the maximal contiguous core span (enforcing >= min_core_len).
 
     Args:
-        h5_path: Path to motif_only_results.h5.
+        h5_path: Path to TF-MoDISco HDF5 file.
         plateau_ratio: Fraction of peak attribution to define the core span.
         min_core_len: Minimum allowed core length in bp.
 
@@ -199,75 +209,80 @@ def load_and_trim_modisco_pwms(
     nucs: List[str] = ["A", "C", "G", "T"]
 
     with h5py.File(h5_path, "r") as f:
-        if "pos_patterns" not in f:
-            raise KeyError("pos_patterns group not found in HDF5 file.")
-        pos_patterns = f["pos_patterns"]
-        sorted_keys = sorted(pos_patterns.keys(), key=pattern_sort_key)
+        if "pos_patterns" not in f and "neg_patterns" not in f:
+            raise KeyError("Neither pos_patterns nor neg_patterns group found in HDF5 file.")
 
-        for pat_name in sorted_keys:
-            seq_matrix = pos_patterns[pat_name]["sequence"][:]  # (L, 4)
-            contrib_matrix = pos_patterns[pat_name]["contrib_scores"][:]  # (L, 4)
-            L = seq_matrix.shape[0]
+        for group_name in ["pos_patterns", "neg_patterns"]:
+            if group_name not in f:
+                continue
+            grp = f[group_name]
+            sorted_keys = sorted(grp.keys(), key=pattern_sort_key)
 
-            pos_attr_magnitude = np.max(np.abs(contrib_matrix), axis=1)  # (L,)
-            peak_attr = float(np.max(pos_attr_magnitude))
-            threshold_val = plateau_ratio * peak_attr
+            for pat_name in sorted_keys:
+                full_name = f"{group_name}.{pat_name}"
+                seq_matrix = grp[pat_name]["sequence"][:]  # (L, 4)
+                contrib_matrix = grp[pat_name]["contrib_scores"][:]  # (L, 4)
+                L = seq_matrix.shape[0]
 
-            # 3-bp smoothing filter
-            smooth_attr = np.convolve(pos_attr_magnitude, np.ones(3) / 3.0, mode="same")
-            smooth_mask = smooth_attr >= threshold_val
+                pos_attr_magnitude = np.max(np.abs(contrib_matrix), axis=1)  # (L,)
+                peak_attr = float(np.max(pos_attr_magnitude))
+                threshold_val = plateau_ratio * peak_attr
 
-            # Find all contiguous runs meeting the threshold
-            runs: List[Tuple[int, int]] = []
-            in_run = False
-            start_idx = 0
-            for i, val in enumerate(smooth_mask):
-                if val and not in_run:
-                    in_run = True
-                    start_idx = i
-                elif not val and in_run:
-                    in_run = False
-                    runs.append((start_idx, i))
-            if in_run:
-                runs.append((start_idx, len(smooth_mask)))
+                # 3-bp smoothing filter
+                smooth_attr = np.convolve(pos_attr_magnitude, np.ones(3) / 3.0, mode="same")
+                smooth_mask = smooth_attr >= threshold_val
 
-            if runs:
-                longest_run = max(runs, key=lambda r: r[1] - r[0])
-            else:
-                peak_pos = int(np.argmax(pos_attr_magnitude))
-                longest_run = (max(0, peak_pos - 3), min(L, peak_pos + 4))
+                # Find all contiguous runs meeting the threshold
+                runs: List[Tuple[int, int]] = []
+                in_run = False
+                start_idx = 0
+                for i, val in enumerate(smooth_mask):
+                    if val and not in_run:
+                        in_run = True
+                        start_idx = i
+                    elif not val and in_run:
+                        in_run = False
+                        runs.append((start_idx, i))
+                if in_run:
+                    runs.append((start_idx, len(smooth_mask)))
 
-            core_start, core_end = longest_run
-            # Ensure minimum core length
-            if (core_end - core_start) < min_core_len:
-                center = (core_start + core_end) // 2
-                half = min_core_len // 2
-                core_start = max(0, center - half)
-                core_end = min(L, core_start + min_core_len)
-                if (core_end - core_start) < min_core_len and core_start > 0:
-                    core_start = max(0, core_end - min_core_len)
+                if runs:
+                    longest_run = max(runs, key=lambda r: r[1] - r[0])
+                else:
+                    peak_pos = int(np.argmax(pos_attr_magnitude))
+                    longest_run = (max(0, peak_pos - 3), min(L, peak_pos + 4))
 
-            trimmed_seq = seq_matrix[core_start:core_end]  # (core_len, 4)
-            trimmed_pwm = trimmed_seq.T.astype(np.float32)  # (4, core_len)
-            motifs[pat_name] = trimmed_pwm
+                core_start, core_end = longest_run
+                # Ensure minimum core length
+                if (core_end - core_start) < min_core_len:
+                    center = (core_start + core_end) // 2
+                    half = min_core_len // 2
+                    core_start = max(0, center - half)
+                    core_end = min(L, core_start + min_core_len)
+                    if (core_end - core_start) < min_core_len and core_start > 0:
+                        core_start = max(0, core_end - min_core_len)
 
-            # Consensus string
-            orig_consensus = "".join(nucs[i] for i in np.argmax(seq_matrix, axis=1))
-            trimmed_consensus = "".join(nucs[i] for i in np.argmax(trimmed_seq, axis=1))
-            consensus_dict[pat_name] = trimmed_consensus
+                trimmed_seq = seq_matrix[core_start:core_end]  # (core_len, 4)
+                trimmed_pwm = trimmed_seq.T.astype(np.float32)  # (4, core_len)
+                motifs[full_name] = trimmed_pwm
 
-            trim_records.append({
-                "pattern_name": pat_name,
-                "orig_length": L,
-                "trimmed_start": core_start,
-                "trimmed_end": core_end,
-                "trimmed_length": core_end - core_start,
-                "peak_pos": int(np.argmax(pos_attr_magnitude)),
-                "peak_attr": round(peak_attr, 2),
-                "threshold_val": round(threshold_val, 2),
-                "orig_consensus": orig_consensus,
-                "trimmed_consensus": trimmed_consensus,
-            })
+                # Consensus string
+                orig_consensus = "".join(nucs[i] for i in np.argmax(seq_matrix, axis=1))
+                trimmed_consensus = "".join(nucs[i] for i in np.argmax(trimmed_seq, axis=1))
+                consensus_dict[full_name] = trimmed_consensus
+
+                trim_records.append({
+                    "pattern_name": full_name,
+                    "orig_length": L,
+                    "trimmed_start": core_start,
+                    "trimmed_end": core_end,
+                    "trimmed_length": core_end - core_start,
+                    "peak_pos": int(np.argmax(pos_attr_magnitude)),
+                    "peak_attr": round(peak_attr, 2),
+                    "threshold_val": round(threshold_val, 2),
+                    "orig_consensus": orig_consensus,
+                    "trimmed_consensus": trimmed_consensus,
+                })
 
     trimming_df = pd.DataFrame(trim_records)
     return motifs, consensus_dict, trimming_df
@@ -601,17 +616,34 @@ def run_local_bg_scan(
 
     for i in range(n_orig):
         pat_name = motif_names[i]
-        fwd_df = pd.DataFrame(raw_hits[i], columns=names)
-        fwd_df["strand"] = "+"
-        rev_df = pd.DataFrame(raw_hits[i + n_orig], columns=names)
-        rev_df["strand"] = "-"
+        strand_dfs: List[pd.DataFrame] = []
+        if len(raw_hits[i]) > 0:
+            fwd_df = pd.DataFrame(raw_hits[i], columns=names)
+            fwd_df["strand"] = "+"
+            strand_dfs.append(fwd_df)
+        if len(raw_hits[i + n_orig]) > 0:
+            rev_df = pd.DataFrame(raw_hits[i + n_orig], columns=names)
+            rev_df["strand"] = "-"
+            strand_dfs.append(rev_df)
 
-        m_df = pd.concat([fwd_df, rev_df], ignore_index=True)
-        m_df["motif_name"] = pat_name
-        if len(m_df) > 0:
+        if strand_dfs:
+            m_df = pd.concat(strand_dfs, ignore_index=True)
+            m_df["chrom_idx"] = m_df["chrom_idx"].astype(np.int64)
+            m_df["start"] = m_df["start"].astype(np.int64)
+            m_df["end"] = m_df["end"].astype(np.int64)
+            m_df["score"] = m_df["score"].astype(np.float64)
+            m_df["motif_name"] = pat_name
             m_df["sequence_name"] = sequence_names[m_df["chrom_idx"].values]
         else:
-            m_df["sequence_name"] = pd.Series(dtype=str)
+            m_df = pd.DataFrame({
+                "chrom_idx": pd.Series(dtype=np.int64),
+                "start": pd.Series(dtype=np.int64),
+                "end": pd.Series(dtype=np.int64),
+                "score": pd.Series(dtype=np.float64),
+                "strand": pd.Series(dtype=str),
+                "motif_name": pd.Series(dtype=str),
+                "sequence_name": pd.Series(dtype=str),
+            })
 
         hits_per_motif[pat_name] = m_df
 
@@ -968,362 +1000,781 @@ def build_conservation_summary(
     return pd.DataFrame(summary_rows)
 
 
-def plot_regional_fold_enrichment_heatmap(
-    summary_df: pd.DataFrame,
-    fe_mat: pd.DataFrame,
-    comp_display_names: List[str],
-    output_png: Path,
-) -> None:
-    """Regional Fold-Enrichment Heatmap with integrated Mammalian Species Coverage."""
-    pattern_order = fe_mat.index.tolist()
-    summary_sorted = summary_df.set_index("pattern_name").loc[pattern_order].reset_index()
+def extract_modisco_seqlets_and_windows(
+    h5_path: Path,
+    metadata_path: Optional[Path],
+    landmarks_df: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame, Path]:
+    """Extracts all TF-MoDISco seqlets and maps them to genomic coordinates and biological compartments."""
+    seqlet_rows: List[pd.DataFrame] = []
+    with h5py.File(h5_path, "r") as f:
+        for group_name in ["pos_patterns", "neg_patterns"]:
+            if group_name not in f:
+                continue
+            grp = f[group_name]
+            for pat_name in sorted(grp.keys(), key=pattern_sort_key):
+                full_name = f"{group_name}.{pat_name}"
+                s_grp = grp[pat_name]["seqlets"]
+                seqlet_rows.append(
+                    pd.DataFrame({
+                        "pattern_name": full_name,
+                        "example_idx": s_grp["example_idx"][:].astype(np.int64),
+                        "seqlet_start": s_grp["start"][:].astype(np.int64),
+                        "seqlet_end": s_grp["end"][:].astype(np.int64),
+                    })
+                )
 
-    fig = plt.figure(figsize=(14, 9), dpi=300)
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1.2, 4.8], wspace=0.08)
+    seqlets_df = pd.concat(seqlet_rows, ignore_index=True)
+    max_ex_idx = int(seqlets_df["example_idx"].max())
 
-    ax_cov = fig.add_subplot(gs[0])
-    ax_hm = fig.add_subplot(gs[1])
+    if metadata_path is None:
+        if max_ex_idx >= 2500:
+            resolved_meta = Path("outputs/tfmodisco_inputs/all_seq/candidate_metadata.parquet")
+        else:
+            resolved_meta = Path("outputs/tfmodisco_inputs/full_no_holdout/candidate_metadata.parquet")
+    else:
+        resolved_meta = metadata_path
 
-    # Left: Species coverage barplot
-    y_pos = np.arange(len(pattern_order))
-    cov_pct = summary_sorted["species_coverage_pct"].values
-    cov_cnt = summary_sorted["num_species_matched"].values
+    if not resolved_meta.is_file():
+        raise FileNotFoundError(f"Candidate metadata parquet not found at: {resolved_meta}")
 
-    ax_cov.barh(y_pos, cov_pct, color="#3b528b", alpha=0.88, height=0.75, edgecolor="#222222", linewidth=0.6)
-    ax_cov.set_xlim(0, 105)
-    ax_cov.set_ylim(-0.5, len(pattern_order) - 0.5)
-    ax_cov.invert_yaxis()
-    ax_cov.set_yticks(y_pos)
-    ax_cov.set_yticklabels(pattern_order, fontsize=10, fontweight="bold")
-    ax_cov.set_xlabel("Species\nCoverage (%)", fontsize=9.5, fontweight="bold")
-    ax_cov.grid(axis="x", linestyle="--", alpha=0.5)
+    meta_df = pd.read_parquet(resolved_meta)
+    for req_col in ["record_id", "window_start", "window_end"]:
+        if req_col not in meta_df.columns:
+            raise KeyError(f"Required column '{req_col}' missing from {resolved_meta}")
 
-    for i, (cnt, pct) in enumerate(zip(cov_cnt, cov_pct)):
-        ax_cov.text(
-            pct - 3.5 if pct > 70 else pct + 2.5,
-            i,
-            f"{cnt} ({pct:.0f}%)",
-            va="center",
-            ha="right" if pct > 70 else "left",
-            fontsize=8,
-            fontweight="bold",
-            color="white" if pct > 70 else "#222222",
+    if max_ex_idx >= len(meta_df):
+        raise IndexError(
+            f"Max seqlet example_idx ({max_ex_idx}) exceeds candidate metadata length ({len(meta_df)}) in {resolved_meta}."
         )
 
-    # Right: Log2 Fold-Enrichment Heatmap
-    sns.heatmap(
-        fe_mat,
-        ax=ax_hm,
-        cmap="vlag",
-        center=0.0,
-        vmin=-4.0,
-        vmax=5.5,
-        annot=True,
-        fmt=".1f",
-        annot_kws={"fontsize": 9, "weight": "bold"},
-        cbar_kws={"label": "$\\log_2(\\mathrm{Observed} / \\mathrm{Expected})$ Fold-Enrichment", "shrink": 0.8},
-        linewidths=0.6,
-        linecolor="#dddddd",
-        yticklabels=False,
-    )
-    ax_hm.set_xticklabels(comp_display_names, rotation=30, ha="right", fontsize=9.5, fontweight="bold")
-    ax_hm.set_ylabel("")
+    matched_meta = meta_df.iloc[seqlets_df["example_idx"].values].reset_index(drop=True)
+    seqlets_df["record_id"] = matched_meta["record_id"].astype(str).values
+    seqlets_df["window_start"] = matched_meta["window_start"].astype(np.int64).values
+    seqlets_df["window_end"] = matched_meta["window_end"].astype(np.int64).values
+    seqlets_df["seqlet_genomic_start"] = seqlets_df["window_start"] + seqlets_df["seqlet_start"]
+    seqlets_df["seqlet_genomic_end"] = seqlets_df["window_start"] + seqlets_df["seqlet_end"]
+    seqlets_df["seqlet_midpoint"] = (seqlets_df["seqlet_genomic_start"] + seqlets_df["seqlet_genomic_end"]) / 2.0
 
-    fig.suptitle(
-        "Mammalian rDNA Motif Spatial Enrichment & Evolutionary Conservation (FDR <= 0.05)\n"
-        "[Left: Species Coverage (N=156) | Right: Log2 Fold-Enrichment relative to null compartment length]",
-        fontsize=12,
-        fontweight="bold",
-        y=0.98,
-    )
+    seqlets_df = seqlets_df.merge(landmarks_df, on="record_id", how="left")
+    midpoint = seqlets_df["seqlet_midpoint"]
+    dist_to_tss = midpoint - seqlets_df["tss_pos"]
+    dist_to_28s_end = midpoint - seqlets_df["term_pos"]
+    is_in_its1 = (midpoint >= seqlets_df["its1_start"]) & (midpoint <= seqlets_df["its1_end"])
+    is_in_its2 = (midpoint >= seqlets_df["its2_start"]) & (midpoint <= seqlets_df["its2_end"])
 
-    output_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_png, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Regional fold-enrichment heatmap saved to: {output_png}")
+    fine_conditions = [
+        (dist_to_tss >= -120.0) & (dist_to_tss <= 100.0),
+        (dist_to_tss >= -2000.0) & (dist_to_tss < -120.0),
+        (dist_to_tss > 100.0) & (dist_to_tss <= 1500.0),
+        is_in_its1,
+        is_in_its2,
+        (dist_to_28s_end >= 0.0) & (dist_to_28s_end <= 1500.0),
+    ]
+    fine_choices = [
+        "Core_Promoter_TSS",
+        "Upstream_Promoter",
+        "5prime_ETS",
+        "ITS1",
+        "ITS2",
+        "Terminator",
+    ]
+    seqlets_df["fine_compartment"] = np.select(fine_conditions, fine_choices, default="Distal_IGS")
+    return seqlets_df, meta_df, resolved_meta
 
 
-def plot_regional_counts_percentages_table(
-    summary_df: pd.DataFrame,
+def compare_fimo_vs_modisco_attribution(
+    annotated_fdr_hits: pd.DataFrame,
+    seqlets_df: pd.DataFrame,
+    meta_df: pd.DataFrame,
+    pattern_order: List[str],
+    comp_labels: List[str],
+) -> pd.DataFrame:
+    """Compares full-genome FIMO sequence hits against TF-MoDISco high-attribution seqlets and candidate windows."""
+    # Pre-index seqlet intervals by (record_id, pattern_name) and by record_id
+    own_seqlet_intervals: Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]] = {}
+    for (rec_id, pat), grp in seqlets_df.groupby(["record_id", "pattern_name"]):
+        own_seqlet_intervals[(str(rec_id), str(pat))] = (
+            grp["seqlet_genomic_start"].values.astype(np.int64),
+            grp["seqlet_genomic_end"].values.astype(np.int64),
+        )
+
+    all_seqlet_intervals: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    for rec_id, grp in seqlets_df.groupby("record_id"):
+        all_seqlet_intervals[str(rec_id)] = (
+            grp["seqlet_genomic_start"].values.astype(np.int64),
+            grp["seqlet_genomic_end"].values.astype(np.int64),
+            grp["pattern_name"].values.astype(str),
+        )
+
+    window_intervals: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    for rec_id, grp in meta_df.groupby("record_id"):
+        window_intervals[str(rec_id)] = (
+            grp["window_start"].values.astype(np.int64),
+            grp["window_end"].values.astype(np.int64),
+        )
+
+    rows: List[Dict[str, Any]] = []
+    for pat in pattern_order:
+        s_own = seqlets_df[seqlets_df["pattern_name"] == pat]
+        f_sub = annotated_fdr_hits[annotated_fdr_hits["motif_name"] == pat] if len(annotated_fdr_hits) > 0 else pd.DataFrame()
+
+        n_seqlets = len(s_own)
+        n_fimo = len(f_sub)
+
+        # 1. Self-recall: how many of pat's MoDISco seqlets overlap >= 1 FIMO hit of pat?
+        recalled_seqlets = 0
+        if n_seqlets > 0 and n_fimo > 0:
+            f_by_rec: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+            for rec_id, f_grp in f_sub.groupby("record_id"):
+                f_by_rec[str(rec_id)] = (
+                    f_grp["start"].values.astype(np.int64),
+                    f_grp["end"].values.astype(np.int64),
+                )
+            for _, s_row in s_own.iterrows():
+                rec_id = str(s_row["record_id"])
+                if rec_id in f_by_rec:
+                    f_starts, f_ends = f_by_rec[rec_id]
+                    s_s = int(s_row["seqlet_genomic_start"])
+                    s_e = int(s_row["seqlet_genomic_end"])
+                    if np.any((f_starts < s_e) & (f_ends > s_s)):
+                        recalled_seqlets += 1
+
+        recall_pct = (recalled_seqlets / n_seqlets * 100.0) if n_seqlets > 0 else 0.0
+
+        # 2. 4-way classification of all genome-wide FIMO hits of pat
+        hit_own_seqlet = 0
+        hit_other_seqlet = 0
+        hit_in_window_silent = 0
+        hit_out_of_window = 0
+
+        if n_fimo > 0:
+            for _, f_row in f_sub.iterrows():
+                rec_id = str(f_row["record_id"])
+                f_s = int(f_row["start"])
+                f_e = int(f_row["end"])
+
+                matched_own = False
+                if (rec_id, pat) in own_seqlet_intervals:
+                    os_starts, os_ends = own_seqlet_intervals[(rec_id, pat)]
+                    if np.any((os_starts < f_e) & (os_ends > f_s)):
+                        matched_own = True
+
+                if matched_own:
+                    hit_own_seqlet += 1
+                    continue
+
+                matched_other = False
+                if rec_id in all_seqlet_intervals:
+                    as_starts, as_ends, as_pats = all_seqlet_intervals[rec_id]
+                    ov_mask = (as_starts < f_e) & (as_ends > f_s) & (as_pats != pat)
+                    if np.any(ov_mask):
+                        matched_other = True
+
+                if matched_other:
+                    hit_other_seqlet += 1
+                    continue
+
+                in_win = False
+                if rec_id in window_intervals:
+                    w_starts, w_ends = window_intervals[rec_id]
+                    if np.any((w_starts < f_e) & (w_ends > f_s)):
+                        in_win = True
+
+                if in_win:
+                    hit_in_window_silent += 1
+                else:
+                    hit_out_of_window += 1
+
+        row_dict: Dict[str, Any] = {
+            "pattern_name": pat,
+            "total_modisco_seqlets": n_seqlets,
+            "recalled_modisco_seqlets": recalled_seqlets,
+            "seqlet_recall_pct": round(recall_pct, 2),
+            "total_fimo_hits": n_fimo,
+            "fimo_in_own_seqlet_count": hit_own_seqlet,
+            "fimo_in_own_seqlet_pct": round(hit_own_seqlet / n_fimo * 100.0, 2) if n_fimo > 0 else 0.0,
+            "fimo_in_other_seqlet_count": hit_other_seqlet,
+            "fimo_in_other_seqlet_pct": round(hit_other_seqlet / n_fimo * 100.0, 2) if n_fimo > 0 else 0.0,
+            "fimo_in_window_silent_count": hit_in_window_silent,
+            "fimo_in_window_silent_pct": round(hit_in_window_silent / n_fimo * 100.0, 2) if n_fimo > 0 else 0.0,
+            "fimo_out_of_window_count": hit_out_of_window,
+            "fimo_out_of_window_pct": round(hit_out_of_window / n_fimo * 100.0, 2) if n_fimo > 0 else 0.0,
+        }
+
+        # 3. Compartment-level comparison: FIMO sequence hits vs MoDISco seqlets
+        for c in comp_labels:
+            f_cnt = int((f_sub["fine_compartment"] == c).sum()) if n_fimo > 0 else 0
+            s_cnt = int((s_own["fine_compartment"] == c).sum()) if n_seqlets > 0 else 0
+            row_dict[f"fimo_{c}_count"] = f_cnt
+            row_dict[f"seqlet_{c}_count"] = s_cnt
+            row_dict[f"log2_fimo_vs_seqlet_{c}"] = round(float(np.log2((f_cnt + 1.0) / (s_cnt + 1.0))), 2)
+
+        rows.append(row_dict)
+
+    return pd.DataFrame(rows)
+
+
+def plot_fimo_vs_modisco_attribution_comparison(
+    comp_df: pd.DataFrame,
     comp_labels: List[str],
     comp_display_names: List[str],
     output_png: Path,
 ) -> None:
-    """Regional Counts & Percentages Heatmap Table across all FDR-significant hits."""
-    pattern_order = summary_df["pattern_name"].tolist()
-    summary_sorted = summary_df.set_index("pattern_name").loc[pattern_order].reset_index()
+    """Plots Self-Match Recall, 4-Way FIMO Hit Attribution Breakdown, and Compartment FIMO vs. MoDISco Comparison."""
+    pattern_order = comp_df["pattern_name"].tolist()
+    num_patterns = len(pattern_order)
+    display_names = [format_pattern_display_name(p) for p in pattern_order]
+    comp_sorted = comp_df.set_index("pattern_name").loc[pattern_order].reset_index()
 
-    comp_count_col_map = {
-        "Core_Promoter_TSS": "core_promoter_count",
-        "Upstream_Promoter": "upstream_uce_count",
-        "5prime_ETS": "5prime_ets_count",
-        "ITS1": "its1_count",
-        "ITS2": "its2_count",
-        "Terminator": "terminator_count",
-        "Distal_IGS": "distal_igs_count",
-    }
+    fig_height = max(9.5, 0.44 * num_patterns + 2.4)
+    cbar_shrink = min(0.8, 10.0 / fig_height)
 
-    pct_mat = pd.DataFrame(index=pattern_order, columns=comp_labels, dtype=float)
-    annot_mat = np.empty((len(pattern_order), len(comp_labels)), dtype=object)
+    fig = plt.figure(figsize=(21, fig_height), dpi=300)
+    gs = gridspec.GridSpec(1, 3, width_ratios=[1.35, 2.35, 4.3], wspace=0.08)
 
-    for i, pat in enumerate(pattern_order):
-        row = summary_sorted[summary_sorted["pattern_name"] == pat].iloc[0]
-        n_hits = int(row["total_fdr_hits"])
-        for j, c in enumerate(comp_labels):
-            cnt = int(row[comp_count_col_map[c]])
-            pct = (cnt / n_hits * 100.0) if n_hits > 0 else 0.0
-            pct_mat.loc[pat, c] = pct
-            annot_mat[i, j] = f"{cnt}\n({pct:.1f}%)" if cnt > 0 else "0\n(0%)"
+    ax_rec = fig.add_subplot(gs[0])
+    ax_brk = fig.add_subplot(gs[1])
+    ax_cmp = fig.add_subplot(gs[2])
 
-    fig = plt.figure(figsize=(14, 9), dpi=300)
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1.2, 4.8], wspace=0.08)
+    # Panel 1 (Left): MoDISco Seqlet Self-Recall (%)
+    y_pos = np.arange(num_patterns)
+    rec_pct = comp_sorted["seqlet_recall_pct"].values
+    rec_cnt = comp_sorted["recalled_modisco_seqlets"].values
+    tot_seq = comp_sorted["total_modisco_seqlets"].values
 
-    ax_cov = fig.add_subplot(gs[0])
-    ax_hm = fig.add_subplot(gs[1])
+    ax_rec.barh(y_pos, rec_pct, color="#2b5c8f", alpha=0.88, height=0.75, edgecolor="#222222", linewidth=0.6)
+    ax_rec.set_xlim(0, 108)
+    ax_rec.set_ylim(-0.5, num_patterns - 0.5)
+    ax_rec.invert_yaxis()
+    ax_rec.set_yticks(y_pos)
+    ax_rec.set_yticklabels(display_names, fontsize=9.5, fontweight="bold")
+    ax_rec.set_xlabel("Own Seqlet Recall (%)\n[FIMO Self-Match]", fontsize=9.5, fontweight="bold")
+    ax_rec.tick_params(axis="x", top=True, labeltop=True, bottom=True, labelbottom=True, labelsize=8.5)
+    ax_rec.grid(axis="x", linestyle="--", alpha=0.5)
 
-    # Left: Species coverage
-    y_pos = np.arange(len(pattern_order))
-    cov_pct = summary_sorted["species_coverage_pct"].values
-    cov_cnt = summary_sorted["num_species_matched"].values
-
-    ax_cov.barh(y_pos, cov_pct, color="#3b528b", alpha=0.88, height=0.75, edgecolor="#222222", linewidth=0.6)
-    ax_cov.set_xlim(0, 105)
-    ax_cov.set_ylim(-0.5, len(pattern_order) - 0.5)
-    ax_cov.invert_yaxis()
-    ax_cov.set_yticks(y_pos)
-    ax_cov.set_yticklabels(pattern_order, fontsize=10, fontweight="bold")
-    ax_cov.set_xlabel("Species\nCoverage (%)", fontsize=9.5, fontweight="bold")
-    ax_cov.grid(axis="x", linestyle="--", alpha=0.5)
-
-    for i, (cnt, pct) in enumerate(zip(cov_cnt, cov_pct)):
-        ax_cov.text(
-            pct - 3.5 if pct > 70 else pct + 2.5,
+    for i, (r_c, t_s, pct) in enumerate(zip(rec_cnt, tot_seq, rec_pct)):
+        ax_rec.text(
+            pct - 3.0 if pct > 68 else pct + 2.0,
             i,
-            f"{cnt} ({pct:.0f}%)",
+            f"{r_c}/{t_s} ({pct:.0f}%)",
             va="center",
-            ha="right" if pct > 70 else "left",
-            fontsize=8,
+            ha="right" if pct > 68 else "left",
+            fontsize=7.8,
             fontweight="bold",
-            color="white" if pct > 70 else "#222222",
+            color="white" if pct > 68 else "#222222",
         )
 
-    # Right: Hit distribution heatmap
+    # Panel 2 (Middle): 4-Way Classification of All Genome-Wide FIMO Hits (FDR <= 0.05)
+    brk_cols = [
+        ("fimo_in_own_seqlet", "Own Seqlet\n(Self-Match)"),
+        ("fimo_in_other_seqlet", "Other Pattern\nSeqlet"),
+        ("fimo_in_window_silent", "In-Window Silent\n(No Seqlet)"),
+        ("fimo_out_of_window", "Outside Windows\n(Unscanned)"),
+    ]
+    brk_pct_mat = np.zeros((num_patterns, len(brk_cols)), dtype=float)
+    brk_annot_mat = np.empty((num_patterns, len(brk_cols)), dtype=object)
+
+    for i, (_, row) in enumerate(comp_sorted.iterrows()):
+        for j, (prefix, _) in enumerate(brk_cols):
+            cnt = int(row[f"{prefix}_count"])
+            pct = float(row[f"{prefix}_pct"])
+            brk_pct_mat[i, j] = pct
+            brk_annot_mat[i, j] = f"{cnt}\n({pct:.1f}%)" if cnt > 0 else "0\n(0%)"
+
+    brk_headers = [label for _, label in brk_cols]
     sns.heatmap(
-        pct_mat,
-        ax=ax_hm,
-        cmap="Blues",
+        brk_pct_mat,
+        ax=ax_brk,
+        cmap="Greens",
         vmin=0.0,
-        vmax=65.0,
-        annot=annot_mat,
+        vmax=100.0,
+        annot=brk_annot_mat,
         fmt="",
-        annot_kws={"fontsize": 8.0, "weight": "bold"},
-        cbar_kws={"label": "FDR Hit Percentage in Compartment (%)", "shrink": 0.8},
+        annot_kws={"fontsize": 7.8, "weight": "bold"},
+        cbar=False,
+        linewidths=0.6,
+        linecolor="#dddddd",
+        yticklabels=False,
+        xticklabels=brk_headers,
+    )
+    ax_brk.set_xticklabels(brk_headers, rotation=25, ha="right", fontsize=9.0, fontweight="bold")
+    ax_brk.set_ylabel("")
+
+    if num_patterns > 25:
+        secax_brk = ax_brk.secondary_xaxis("top")
+        secax_brk.set_xticks(np.arange(len(brk_headers)) + 0.5)
+        secax_brk.set_xticklabels(brk_headers, rotation=25, ha="left", fontsize=9.0, fontweight="bold")
+
+    # Panel 3 (Right): Compartment Comparison — Full-Genome FIMO Hits vs. MoDISco Seqlets
+    ratio_mat = pd.DataFrame(index=pattern_order, columns=comp_labels, dtype=float)
+    cmp_annot_mat = np.empty((num_patterns, len(comp_labels)), dtype=object)
+
+    for i, pat in enumerate(pattern_order):
+        row = comp_sorted.iloc[i]
+        for j, c in enumerate(comp_labels):
+            f_cnt = int(row[f"fimo_{c}_count"])
+            s_cnt = int(row[f"seqlet_{c}_count"])
+            ratio_mat.loc[pat, c] = float(row[f"log2_fimo_vs_seqlet_{c}"])
+            if f_cnt == 0 and s_cnt == 0:
+                cmp_annot_mat[i, j] = "-"
+            else:
+                cmp_annot_mat[i, j] = f"F:{f_cnt}\nM:{s_cnt}"
+
+    sns.heatmap(
+        ratio_mat,
+        ax=ax_cmp,
+        cmap="vlag",
+        center=0.0,
+        vmin=-4.0,
+        vmax=4.0,
+        annot=cmp_annot_mat,
+        fmt="",
+        annot_kws={"fontsize": 7.6, "weight": "bold"},
+        cbar_kws={
+            "label": "$\\log_2((\\mathrm{FIMO\\ Hits}+1) / (\\mathrm{MoDISco\\ Seqlets}+1))$ [Red: Excess FIMO | Blue: Missed Seqlets]",
+            "shrink": cbar_shrink,
+            "aspect": 25,
+        },
         linewidths=0.6,
         linecolor="#dddddd",
         yticklabels=False,
     )
-    ax_hm.set_xticklabels(comp_display_names, rotation=30, ha="right", fontsize=9.5, fontweight="bold")
-    ax_hm.set_ylabel("")
+    ax_cmp.set_xticklabels(comp_display_names, rotation=25, ha="right", fontsize=9.0, fontweight="bold")
+    ax_cmp.set_ylabel("")
 
+    if num_patterns > 25:
+        secax_cmp = ax_cmp.secondary_xaxis("top")
+        secax_cmp.set_xticks(np.arange(len(comp_display_names)) + 0.5)
+        secax_cmp.set_xticklabels(comp_display_names, rotation=25, ha="left", fontsize=9.0, fontweight="bold")
+
+    top_edge = ax_cmp.get_position().y1
+    title_y = top_edge + (1.55 / fig_height) if num_patterns > 25 else 0.985
     fig.suptitle(
-        "Mammalian rDNA Motif Spatial Distribution: Counts & Percentages (All FDR <= 0.05 Hits)\n"
-        "[Left: Species Coverage (N=156) | Right: Hit Count & % of Total FDR Hits per Compartment]",
-        fontsize=12,
+        "Full-Genome Sequence Occurrences (FIMO, FDR <= 0.05) vs. High-Attribution Seqlets (TF-MoDISco)\n"
+        "[Left: Own Seqlet Self-Recall | Middle: 4-Way FIMO Hit Attribution Breakdown | Right: Compartment FIMO Hits (F) vs. MoDISco Seqlets (M)]",
+        fontsize=12.5,
         fontweight="bold",
-        y=0.98,
+        y=title_y,
     )
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"Regional counts & percentages table saved to: {output_png}")
+    print(f"FIMO vs. MoDISco attribution comparison plot saved to: {output_png}")
 
 
-def plot_promoter_terminator_spatial_metaprofile(
-    fdr_hits: pd.DataFrame,
+def compute_active_vs_silent_fimo_attribution(
+    annotated_fdr_hits: pd.DataFrame,
+    seqlets_df: pd.DataFrame,
+    meta_df: pd.DataFrame,
+    att_1d: np.ndarray,
+    trimming_df: pd.DataFrame,
+    summary_df: pd.DataFrame,
+    pattern_order: List[str],
+) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    """Computes per-pattern nucleotide dependency attribution distributions for Active vs. Silent FIMO hits.
+
+    Args:
+        annotated_fdr_hits: DataFrame of all genome-wide FIMO hits passing FDR <= threshold.
+        seqlets_df: DataFrame of all TF-MoDISco seqlets mapped to genomic coordinates.
+        meta_df: DataFrame of candidate attribution windows (row index == example_idx in att_1d).
+        att_1d: 2D array of per-position nucleotide dependency centrality, shape (N_windows, 400).
+        trimming_df: DataFrame of core motif trimming boundaries (trimmed_start, trimmed_end).
+        summary_df: DataFrame of conservation summary containing primary_enriched_compartment.
+        pattern_order: Ordered list of pattern names.
+
+    Returns:
+        act_sil_df: DataFrame of per-pattern Active vs. Silent attribution and compartment statistics.
+        global_bg_stats: Dictionary with global candidate window background median, Q25, and Q75.
+    """
+    win_len = att_1d.shape[1]
+    global_bg_stats: Dict[str, float] = {
+        "bg_median": float(np.median(att_1d)),
+        "bg_q25": float(np.percentile(att_1d, 25)),
+        "bg_q75": float(np.percentile(att_1d, 75)),
+        "bg_mean": float(np.mean(att_1d)),
+    }
+
+    # Index candidate windows by record_id -> (window_idxs, window_starts, window_ends)
+    win_by_rec: Dict[str, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+    meta_with_idx = meta_df.copy()
+    meta_with_idx["win_idx"] = np.arange(len(meta_df), dtype=np.int64)
+    for rec_id, grp in meta_with_idx.groupby("record_id"):
+        win_by_rec[str(rec_id)] = (
+            grp["win_idx"].values.astype(np.int64),
+            grp["window_start"].values.astype(np.int64),
+            grp["window_end"].values.astype(np.int64),
+        )
+
+    # Index seqlet intervals by (record_id, pattern_name) and by record_id
+    own_seqlet_intervals: Dict[Tuple[str, str], Tuple[np.ndarray, np.ndarray]] = {}
+    for (rec_id, pat), grp in seqlets_df.groupby(["record_id", "pattern_name"]):
+        own_seqlet_intervals[(str(rec_id), str(pat))] = (
+            grp["seqlet_genomic_start"].values.astype(np.int64),
+            grp["seqlet_genomic_end"].values.astype(np.int64),
+        )
+
+    all_seqlet_intervals: Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
+    for rec_id, grp in seqlets_df.groupby("record_id"):
+        all_seqlet_intervals[str(rec_id)] = (
+            grp["seqlet_genomic_start"].values.astype(np.int64),
+            grp["seqlet_genomic_end"].values.astype(np.int64),
+        )
+
+    trim_lookup: Dict[str, Tuple[int, int]] = {}
+    for _, t_row in trimming_df.iterrows():
+        trim_lookup[str(t_row["pattern_name"])] = (
+            int(t_row["trimmed_start"]),
+            int(t_row["trimmed_end"]),
+        )
+
+    # Determine each pattern's primary conserved compartment directly from its TF-MoDISco seqlets
+    bg_comp_props: Dict[str, float] = {
+        "Core_Promoter_TSS": 0.0143,
+        "Upstream_Promoter": 0.0786,
+        "5prime_ETS": 0.0970,
+        "ITS1": 0.0987,
+        "ITS2": 0.0800,
+        "Terminator": 0.0474,
+        "Distal_IGS": 0.5840,
+    }
+    primary_comp_lookup: Dict[str, str] = {}
+    for pat in pattern_order:
+        s_own_c = seqlets_df[seqlets_df["pattern_name"] == pat]
+        n_s = len(s_own_c)
+        best_c = "Distal_IGS"
+        best_fe = -1e9
+        for c_name, bg_p in bg_comp_props.items():
+            cnt_c = int((s_own_c["fine_compartment"] == c_name).sum()) if n_s > 0 else 0
+            obs_p = (cnt_c + bg_p) / (n_s + 1.0)
+            fe_c = float(np.log2(obs_p / bg_p))
+            if fe_c > best_fe:
+                best_fe = fe_c
+                best_c = c_name
+        primary_comp_lookup[pat] = best_c
+
+    rows: List[Dict[str, Any]] = []
+    for pat in pattern_order:
+        s_own = seqlets_df[seqlets_df["pattern_name"] == pat]
+        f_sub = (
+            annotated_fdr_hits[annotated_fdr_hits["motif_name"] == pat]
+            if len(annotated_fdr_hits) > 0
+            else pd.DataFrame()
+        )
+        c_start, c_end = trim_lookup[pat]
+        prim_comp = primary_comp_lookup[pat]
+
+        # Compute core attribution for all MoDISco seqlets of this pattern
+        modisco_core_attrs: List[float] = []
+        for _, s_row in s_own.iterrows():
+            ex_i = int(s_row["example_idx"])
+            ss = int(s_row["seqlet_start"])
+            a_s = max(0, min(win_len - 1, ss + c_start))
+            a_e = max(a_s + 1, min(win_len, ss + c_end))
+            modisco_core_attrs.append(float(np.mean(att_1d[ex_i, a_s:a_e])))
+
+        active_fimo_attrs: List[float] = []
+        silent_fimo_attrs: List[float] = []
+        active_pwm_scores: List[float] = []
+        silent_pwm_scores: List[float] = []
+
+        active_comp_list: List[str] = []
+        silent_comp_list: List[str] = []
+
+        if len(f_sub) > 0:
+            for _, f_row in f_sub.iterrows():
+                rec_id = str(f_row["record_id"])
+                f_s = int(f_row["start"])
+                f_e = int(f_row["end"])
+                f_score = float(f_row["score"])
+                f_comp = str(f_row["fine_compartment"])
+
+                matched_own = False
+                if (rec_id, pat) in own_seqlet_intervals:
+                    os_starts, os_ends = own_seqlet_intervals[(rec_id, pat)]
+                    if np.any((os_starts < f_e) & (os_ends > f_s)):
+                        matched_own = True
+
+                matched_any_seqlet = matched_own
+                if not matched_any_seqlet and rec_id in all_seqlet_intervals:
+                    as_starts, as_ends = all_seqlet_intervals[rec_id]
+                    if np.any((as_starts < f_e) & (as_ends > f_s)):
+                        matched_any_seqlet = True
+
+                # Check if hit overlaps a candidate attribution window in att_1d
+                hit_win_attrs: List[float] = []
+                if rec_id in win_by_rec:
+                    w_idxs, w_starts, w_ends = win_by_rec[rec_id]
+                    ov_w = np.where((w_starts < f_e) & (w_ends > f_s))[0]
+                    for wi in ov_w:
+                        w_idx = int(w_idxs[wi])
+                        w_s = int(w_starts[wi])
+                        rel_s = max(0, f_s - w_s)
+                        rel_e = min(win_len, f_e - w_s)
+                        if rel_e > rel_s:
+                            hit_win_attrs.append(float(np.mean(att_1d[w_idx, rel_s:rel_e])))
+
+                if matched_own:
+                    active_pwm_scores.append(f_score)
+                    active_comp_list.append(f_comp)
+                    if hit_win_attrs:
+                        active_fimo_attrs.append(float(np.max(hit_win_attrs)))
+                elif not matched_any_seqlet:
+                    silent_pwm_scores.append(f_score)
+                    silent_comp_list.append(f_comp)
+                    if hit_win_attrs:
+                        silent_fimo_attrs.append(float(np.max(hit_win_attrs)))
+
+        # Use active_fimo_attrs when present, falling back to modisco_core_attrs if FIMO had 0 self-matches
+        act_arr = np.array(active_fimo_attrs if len(active_fimo_attrs) > 0 else modisco_core_attrs, dtype=np.float64)
+        sil_arr = np.array(silent_fimo_attrs, dtype=np.float64)
+
+        act_med = float(np.median(act_arr)) if len(act_arr) > 0 else np.nan
+        act_q25 = float(np.percentile(act_arr, 25)) if len(act_arr) > 0 else np.nan
+        act_q75 = float(np.percentile(act_arr, 75)) if len(act_arr) > 0 else np.nan
+        act_mean = float(np.mean(act_arr)) if len(act_arr) > 0 else np.nan
+
+        if len(sil_arr) > 0:
+            sil_med = float(np.median(sil_arr))
+            sil_q25 = float(np.percentile(sil_arr, 25))
+            sil_q75 = float(np.percentile(sil_arr, 75))
+            sil_mean = float(np.mean(sil_arr))
+            _, mwu_p = mannwhitneyu(act_arr, sil_arr, alternative="greater")
+            mwu_pval = float(mwu_p)
+            attr_ratio = act_mean / max(1e-6, sil_mean)
+        else:
+            sil_med = np.nan
+            sil_q25 = np.nan
+            sil_q75 = np.nan
+            sil_mean = np.nan
+            mwu_pval = np.nan
+            attr_ratio = act_mean / max(1e-6, global_bg_stats["bg_mean"])
+
+        act_pwm_med = float(np.median(active_pwm_scores)) if len(active_pwm_scores) > 0 else np.nan
+        sil_pwm_med = float(np.median(silent_pwm_scores)) if len(silent_pwm_scores) > 0 else np.nan
+
+        # Primary compartment localization (%): Active vs Silent
+        if len(active_comp_list) > 0:
+            act_prim_pct = sum(1 for c in active_comp_list if c == prim_comp) / len(active_comp_list) * 100.0
+        elif len(s_own) > 0:
+            act_prim_pct = float((s_own["fine_compartment"] == prim_comp).mean() * 100.0)
+        else:
+            act_prim_pct = 0.0
+
+        if len(silent_comp_list) > 0:
+            sil_prim_pct = sum(1 for c in silent_comp_list if c == prim_comp) / len(silent_comp_list) * 100.0
+        else:
+            sil_prim_pct = 0.0
+
+        rows.append({
+            "pattern_name": pat,
+            "primary_compartment": prim_comp,
+            "n_active_in_window": len(active_fimo_attrs),
+            "n_modisco_seqlets": len(modisco_core_attrs),
+            "n_silent_in_window": len(silent_fimo_attrs),
+            "n_silent_total": len(silent_comp_list),
+            "active_attr_median": round(act_med, 2) if not np.isnan(act_med) else np.nan,
+            "active_attr_q25": round(act_q25, 2) if not np.isnan(act_q25) else np.nan,
+            "active_attr_q75": round(act_q75, 2) if not np.isnan(act_q75) else np.nan,
+            "active_attr_mean": round(act_mean, 2) if not np.isnan(act_mean) else np.nan,
+            "silent_attr_median": round(sil_med, 2) if not np.isnan(sil_med) else np.nan,
+            "silent_attr_q25": round(sil_q25, 2) if not np.isnan(sil_q25) else np.nan,
+            "silent_attr_q75": round(sil_q75, 2) if not np.isnan(sil_q75) else np.nan,
+            "silent_attr_mean": round(sil_mean, 2) if not np.isnan(sil_mean) else np.nan,
+            "active_vs_silent_attr_ratio": round(attr_ratio, 2),
+            "active_vs_bg_attr_ratio": round(act_mean / max(1e-6, global_bg_stats["bg_mean"]), 2),
+            "active_pwm_score_median": round(act_pwm_med, 2) if not np.isnan(act_pwm_med) else np.nan,
+            "silent_pwm_score_median": round(sil_pwm_med, 2) if not np.isnan(sil_pwm_med) else np.nan,
+            "mwu_pval_active_gt_silent": mwu_pval,
+            "active_in_primary_comp_pct": round(act_prim_pct, 1),
+            "silent_in_primary_comp_pct": round(sil_prim_pct, 1),
+        })
+
+    return pd.DataFrame(rows), global_bg_stats
+
+
+def plot_active_vs_silent_fimo_attribution(
+    act_sil_df: pd.DataFrame,
+    global_bg_stats: Dict[str, float],
     output_png: Path,
 ) -> None:
-    """High-Resolution Spatial Positioning at Promoter (TSS) & 28S Terminator across FDR hits."""
-    fig, (ax_c1, ax_c2) = plt.subplots(2, 1, figsize=(12, 10.5), dpi=300)
-    plt.subplots_adjust(hspace=0.38)
+    """Plots the 2-panel Active vs. Silent FIMO Hit Attribution Distribution & Statistical Table figure."""
+    from matplotlib.colors import ListedColormap
 
-    # 1. Promoter & 5' ETS
-    prom_motifs = ["pattern_11", "pattern_6", "pattern_10", "pattern_1", "pattern_4"]
-    prom_sub = fdr_hits[fdr_hits["motif_name"].isin(prom_motifs) &
-                        (fdr_hits["dist_to_tss"] >= -600.0) &
-                        (fdr_hits["dist_to_tss"] <= 600.0)].copy()
+    pattern_order = act_sil_df["pattern_name"].tolist()
+    num_patterns = len(pattern_order)
+    display_names = [format_pattern_display_name(p) for p in pattern_order]
+    df_sorted = act_sil_df.set_index("pattern_name").loc[pattern_order].reset_index()
 
-    ax_c1.axvline(0, color="darkred", linestyle="--", linewidth=1.5, label="TSS (0 bp)")
-    ax_c1.axvspan(-120, 0, color="lightcoral", alpha=0.32, label="Core Promoter (-120..0 bp)")
-    ax_c1.axvspan(0, 300, color="peachpuff", alpha=0.28, label="Proximal 5' ETS (0..+300 bp)")
+    fig_height = max(9.5, 0.44 * num_patterns + 2.4)
 
-    if len(prom_sub) > 0:
-        sns.boxplot(
-            data=prom_sub,
-            x="dist_to_tss",
-            y="motif_name",
-            hue="motif_name",
-            order=prom_motifs,
-            ax=ax_c1,
-            palette="Reds",
-            legend=False,
-            fliersize=2.0,
-            linewidth=1.0,
-            width=0.55,
-        )
-        sns.stripplot(
-            data=prom_sub,
-            x="dist_to_tss",
-            y="motif_name",
-            hue="motif_name",
-            order=prom_motifs,
-            ax=ax_c1,
-            palette=["darkred"] * len(prom_motifs),
-            legend=False,
-            size=4.0,
-            alpha=0.6,
-            jitter=0.2,
-        )
+    fig = plt.figure(figsize=(13.0, fig_height), dpi=300, facecolor="white")
+    gs = gridspec.GridSpec(1, 2, width_ratios=[2.4, 1.6], wspace=0.06)
 
-    counts_prom = prom_sub["motif_name"].value_counts().to_dict() if len(prom_sub) > 0 else {}
-    ytick_labels_c1 = [
-        f"{p} (N={counts_prom.get(p, 0)})" for p in prom_motifs
+    ax_dist = fig.add_subplot(gs[0])
+    ax_tbl = fig.add_subplot(gs[1])
+
+    y_pos = np.arange(num_patterns)
+
+    # -------------------------------------------------------------------------
+    # Panel 1 (Left): Active vs. In-Window Silent Nucleotide Dependency Distribution
+    # -------------------------------------------------------------------------
+    bg_med = global_bg_stats["bg_median"]
+    bg_q25 = global_bg_stats["bg_q25"]
+    bg_q75 = global_bg_stats["bg_q75"]
+
+    ax_dist.axvspan(
+        bg_q25,
+        bg_q75,
+        color="#dddddd",
+        alpha=0.65,
+        zorder=1,
+        label=f"Window Bg IQR ({bg_q25:.1f}–{bg_q75:.1f})",
+    )
+    ax_dist.axvline(
+        bg_med,
+        color="#555555",
+        linestyle="--",
+        linewidth=1.4,
+        zorder=2,
+        label=f"Window Bg Median ({bg_med:.1f})",
+    )
+
+    act_med = df_sorted["active_attr_median"].values
+    act_q25 = df_sorted["active_attr_q25"].values
+    act_q75 = df_sorted["active_attr_q75"].values
+
+    sil_med = df_sorted["silent_attr_median"].values
+    sil_q25 = df_sorted["silent_attr_q25"].values
+    sil_q75 = df_sorted["silent_attr_q75"].values
+
+    # Plot horizontal IQR intervals and medians for Active (y - 0.15) and Silent (y + 0.15)
+    for i in range(num_patterns):
+        if not np.isnan(act_med[i]):
+            ax_dist.plot(
+                [act_q25[i], act_q75[i]],
+                [i - 0.15, i - 0.15],
+                color="#b2182b",
+                linewidth=2.3,
+                alpha=0.90,
+                zorder=4,
+            )
+            ax_dist.scatter(
+                [act_med[i]],
+                [i - 0.15],
+                color="#b2182b",
+                edgecolor="white",
+                s=46,
+                linewidth=0.6,
+                zorder=5,
+                label="Active Hit (Own Seqlet)" if i == 0 else None,
+            )
+        if not np.isnan(sil_med[i]):
+            ax_dist.plot(
+                [sil_q25[i], sil_q75[i]],
+                [i + 0.15, i + 0.15],
+                color="#2166ac",
+                linewidth=2.3,
+                alpha=0.90,
+                zorder=4,
+            )
+            ax_dist.scatter(
+                [sil_med[i]],
+                [i + 0.15],
+                color="#2166ac",
+                edgecolor="white",
+                marker="D",
+                s=38,
+                linewidth=0.6,
+                zorder=5,
+                label="In-Window Silent FIMO Hit" if i == int(np.where(~np.isnan(sil_med))[0][0]) else None,
+            )
+
+    max_x = max(
+        float(np.nanmax(act_q75)) if np.any(~np.isnan(act_q75)) else 200.0,
+        float(np.nanmax(sil_q75)) if np.any(~np.isnan(sil_q75)) else 100.0,
+    )
+    ax_dist.set_xlim(0, max_x * 1.12)
+    ax_dist.set_ylim(-0.6, num_patterns - 0.4)
+    ax_dist.invert_yaxis()
+    ax_dist.set_yticks(y_pos)
+    ax_dist.set_yticklabels(display_names, fontsize=9.5, fontweight="bold")
+    ax_dist.set_xlabel("Per-Base Nucleotide Dependency Attribution\n[Median & 25–75% IQR]", fontsize=9.5, fontweight="bold")
+    ax_dist.tick_params(axis="x", top=True, labeltop=True, bottom=True, labelbottom=True, labelsize=8.5)
+    ax_dist.grid(axis="x", linestyle="--", alpha=0.5)
+    ax_dist.grid(axis="y", linestyle=":", alpha=0.35)
+    leg = ax_dist.legend(
+        loc="upper right",
+        fontsize=9.5,
+        frameon=True,
+        framealpha=0.96,
+        facecolor="white",
+        edgecolor="#666666",
+        borderpad=0.6,
+        labelspacing=0.45,
+        markerscale=1.25,
+    )
+    for txt in leg.get_texts():
+        txt.set_fontweight("bold")
+
+    # -------------------------------------------------------------------------
+    # Panel 2 (Right): Uncolored Quantitative Attribution Ratio Table
+    # -------------------------------------------------------------------------
+    tbl_headers = [
+        "Active Attr\nMed (N)",
+        "Silent Attr\nMed (N)",
+        "Active/Silent\nAttr Ratio",
     ]
-    ax_c1.set_yticks(np.arange(len(prom_motifs)))
-    ax_c1.set_yticklabels(ytick_labels_c1, fontsize=10, fontweight="bold")
-    ax_c1.set_xlim(-600, 600)
-    ax_c1.set_ylabel("")
-    ax_c1.set_xlabel("Distance to Transcription Start Site (TSS, bp)", fontsize=11, fontweight="bold")
-    ax_c1.set_title("Promoter & Transcription Initiation Junction Metaprofile (FDR Hits)", fontsize=11.5, fontweight="bold", loc="left")
-    ax_c1.grid(axis="x", linestyle="--", alpha=0.45)
-    ax_c1.legend(loc="upper right", fontsize=8.5, framealpha=0.92)
+    tbl_annot_mat = np.empty((num_patterns, len(tbl_headers)), dtype=object)
 
-    # 2. 28S Terminator
-    term_motifs = ["pattern_9", "pattern_5", "pattern_16", "pattern_13", "pattern_6"]
-    term_sub = fdr_hits[fdr_hits["motif_name"].isin(term_motifs) &
-                        (fdr_hits["dist_to_28s_end"] >= -200.0) &
-                        (fdr_hits["dist_to_28s_end"] <= 1500.0)].copy()
+    for i, (_, row) in enumerate(df_sorted.iterrows()):
+        n_act = int(row["n_active_in_window"]) if int(row["n_active_in_window"]) > 0 else int(row["n_modisco_seqlets"])
+        n_sil = int(row["n_silent_in_window"])
+        a_m = float(row["active_attr_median"])
+        s_m = float(row["silent_attr_median"])
+        ratio = float(row["active_vs_silent_attr_ratio"])
 
-    ax_c2.axvline(0, color="darkblue", linestyle="--", linewidth=1.5, label="28S 3'-end (0 bp)")
-    ax_c2.axvspan(0, 1000, color="lightblue", alpha=0.35, label="TTF-1 Arrest Sal-boxes (0..+1kb)")
+        tbl_annot_mat[i, 0] = f"{a_m:.1f} (n={n_act})" if not np.isnan(a_m) else "-"
+        tbl_annot_mat[i, 1] = f"{s_m:.1f} (n={n_sil})" if n_sil > 0 and not np.isnan(s_m) else "0 silent\nin-win"
+        tbl_annot_mat[i, 2] = f"{ratio:.2f}x"
 
-    if len(term_sub) > 0:
-        sns.boxplot(
-            data=term_sub,
-            x="dist_to_28s_end",
-            y="motif_name",
-            hue="motif_name",
-            order=term_motifs,
-            ax=ax_c2,
-            palette="Blues",
-            legend=False,
-            fliersize=2.0,
-            linewidth=1.0,
-            width=0.55,
-        )
-        sns.stripplot(
-            data=term_sub,
-            x="dist_to_28s_end",
-            y="motif_name",
-            hue="motif_name",
-            order=term_motifs,
-            ax=ax_c2,
-            palette=["darkblue"] * len(term_motifs),
-            legend=False,
-            size=4.0,
-            alpha=0.6,
-            jitter=0.2,
-        )
+    cmap_white = ListedColormap(["#ffffff"])
+    sns.heatmap(
+        np.zeros((num_patterns, len(tbl_headers))),
+        ax=ax_tbl,
+        cmap=cmap_white,
+        annot=tbl_annot_mat,
+        fmt="",
+        annot_kws={"fontsize": 8.5, "weight": "bold", "color": "#111111"},
+        cbar=False,
+        linewidths=0.7,
+        linecolor="#d0d0d0",
+        yticklabels=False,
+        xticklabels=tbl_headers,
+    )
+    ax_tbl.set_xticklabels(tbl_headers, rotation=25, ha="right", fontsize=9.0, fontweight="bold")
+    ax_tbl.set_ylabel("")
 
-    counts_term = term_sub["motif_name"].value_counts().to_dict() if len(term_sub) > 0 else {}
-    ytick_labels_c2 = [
-        f"{p} (N={counts_term.get(p, 0)})" for p in term_motifs
-    ]
-    ax_c2.set_yticks(np.arange(len(term_motifs)))
-    ax_c2.set_yticklabels(ytick_labels_c2, fontsize=10, fontweight="bold")
-    ax_c2.set_xlim(-200, 1500)
-    ax_c2.set_ylabel("")
-    ax_c2.set_xlabel("Distance to 28S rRNA 3'-end Boundary (bp)", fontsize=11, fontweight="bold")
-    ax_c2.set_title("28S Pre-rRNA Termination Metaprofile (FDR Hits)", fontsize=11.5, fontweight="bold", loc="left")
-    ax_c2.grid(axis="x", linestyle="--", alpha=0.45)
-    ax_c2.legend(loc="upper right", fontsize=8.5, framealpha=0.92)
+    if num_patterns > 25:
+        secax_tbl = ax_tbl.secondary_xaxis("top")
+        secax_tbl.set_xticks(np.arange(len(tbl_headers)) + 0.5)
+        secax_tbl.set_xticklabels(tbl_headers, rotation=25, ha="left", fontsize=9.0, fontweight="bold")
 
-    fig.tight_layout()
+    top_edge = ax_tbl.get_position().y1
+    title_y = top_edge + (1.50 / fig_height) if num_patterns > 25 else 0.985
+    fig.suptitle(
+        "Active vs. Silent FIMO Sequence Hits: Nucleotide Dependency Attribution Distribution\n"
+        "[Left: Active vs. In-Window Silent Attribution (Median & IQR) | Right: Active vs. Silent Attribution Summary]",
+        fontsize=12.5,
+        fontweight="bold",
+        y=title_y,
+    )
+
     output_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_png, dpi=300)
+    fig.savefig(output_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print(f"Promoter & Terminator spatial metaprofile saved to: {output_png}")
-
-
-def plot_its2_subdomain_architecture(
-    fdr_hits: pd.DataFrame,
-    output_png: Path,
-) -> None:
-    """Ordered ITS2 Subdomain Architecture Map [0.0, 1.0] across FDR hits."""
-    fig, ax = plt.subplots(figsize=(11.5, 8.5), dpi=300)
-
-    its2_motifs = ["pattern_14", "pattern_8", "pattern_3", "pattern_15", "pattern_12", "pattern_7", "pattern_4"]
-    its2_sub = fdr_hits[fdr_hits["motif_name"].isin(its2_motifs) & fdr_hits["is_in_its2"]].copy()
-
-    # Structural Helices shading
-    ax.axvspan(0.05, 0.25, color="#e0e0e0", alpha=0.35, label="Helix I")
-    ax.axvspan(0.25, 0.40, color="#b3cde3", alpha=0.35, label="Helix II")
-    ax.axvspan(0.40, 0.70, color="#decbe4", alpha=0.45, label="Helix III (Apical Core)")
-    ax.axvspan(0.75, 0.95, color="#fed9a6", alpha=0.4, label="Helix IV (28S Junction)")
-
-    ax.axvline(0.0, color="purple", linestyle="--", linewidth=1.2)
-    ax.axvline(1.0, color="navy", linestyle="--", linewidth=1.2)
-
-    palette_its2 = sns.color_palette("mako", n_colors=len(its2_motifs))
-
-    if len(its2_sub) > 0:
-        sns.boxplot(
-            data=its2_sub,
-            x="its2_rel_pos",
-            y="motif_name",
-            hue="motif_name",
-            order=its2_motifs,
-            ax=ax,
-            palette=palette_its2,
-            legend=False,
-            fliersize=2.0,
-            linewidth=1.0,
-            width=0.6,
-        )
-        sns.stripplot(
-            data=its2_sub,
-            x="its2_rel_pos",
-            y="motif_name",
-            hue="motif_name",
-            order=its2_motifs,
-            ax=ax,
-            palette=["#222222"] * len(its2_motifs),
-            legend=False,
-            size=4.5,
-            alpha=0.65,
-            jitter=0.2,
-        )
-
-    counts = its2_sub["motif_name"].value_counts().to_dict() if len(its2_sub) > 0 else {}
-    ytick_labels = [
-        f"{p} (N={counts.get(p, 0)})" for p in its2_motifs
-    ]
-    ax.set_yticks(np.arange(len(its2_motifs)))
-    ax.set_yticklabels(ytick_labels, fontsize=10, fontweight="bold")
-    ax.set_xlim(-0.05, 1.05)
-    ax.set_xlabel("Normalized Position within ITS2 [0 = 5.8S 3'-end, 1 = 28S 5'-start]", fontsize=11, fontweight="bold")
-    ax.set_ylabel("")
-    ax.set_title("ITS2 Subdomain Secondary Structure Architecture Across Mammalia\n"
-                 "[Sequential progression: Helix II stem → Apical Helix III core & cleavage loop → Helix IV]",
-                 fontsize=11.5, fontweight="bold", loc="left")
-    ax.grid(axis="x", linestyle="--", alpha=0.5)
-    ax.legend(loc="upper left", fontsize=9, framealpha=0.92)
-
-    fig.tight_layout()
-    output_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_png, dpi=300)
-    plt.close(fig)
-    print(f"ITS2 subdomain architecture saved to: {output_png}")
+    print(f"Active vs. Silent FIMO hit attribution distribution plot saved to: {output_png}")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -1336,6 +1787,18 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         default=Path("outputs/tfmodisco_runs/full_tuned/motif_only_results.h5"),
         help="Path to TF-MoDISco motif_only_results.h5.",
+    )
+    parser.add_argument(
+        "--metadata",
+        type=Path,
+        default=None,
+        help="Optional path to candidate_metadata.parquet (auto-detected if omitted).",
+    )
+    parser.add_argument(
+        "--attributions",
+        type=Path,
+        default=None,
+        help="Optional path to attributions.npz (auto-detected alongside candidate_metadata.parquet if omitted).",
     )
     parser.add_argument(
         "--records",
@@ -1358,8 +1821,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--plateau-ratio",
         type=float,
-        default=0.50,
-        help="CWM peak attribution fraction threshold for core motif trimming (default: 0.50).",
+        default=0.65,
+        help="CWM peak attribution fraction threshold for core motif trimming (default: 0.65).",
     )
     parser.add_argument(
         "--min-core-len",
@@ -1384,6 +1847,12 @@ def parse_arguments() -> argparse.Namespace:
         type=float,
         default=0.05,
         help="Target empirical False Discovery Rate (FDR) threshold (default: 0.05).",
+    )
+    parser.add_argument(
+        "--replot-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="If True and fimo_all_hits_annotated.parquet already exists, skip FASTA scanning and regenerate downstream tables/plots.",
     )
     parser.add_argument(
         "--seed",
@@ -1416,6 +1885,7 @@ def main() -> None:
     print(f"Local Window Size:  {args.window_size} bp")
     print(f"Score Floor:        {args.score_floor}")
     print(f"FDR Threshold:      {args.fdr_thresh}")
+    print(f"Replot Only:        {args.replot_only}")
     print(f"Seed:               {args.seed}")
     print("=" * 85)
 
@@ -1429,95 +1899,102 @@ def main() -> None:
     trimming_tsv_path = output_dir / "motif_trimming_summary.tsv"
     trimming_df.to_csv(trimming_tsv_path, sep="\t", index=False)
     print(f"Successfully trimmed {len(motifs)} motifs. Summary saved to: {trimming_tsv_path}")
-    print(trimming_df[["pattern_name", "orig_length", "trimmed_length", "trimmed_consensus"]].to_string(index=False))
-
-    # 2. Export clean temporary real FASTA and shuffled null FASTA
-    print("\n[Step 2/8] Exporting real and exact dinucleotide-shuffled null FASTAs...")
-    with tempfile.NamedTemporaryFile("w", suffix=".fa", delete=False) as tmp_real, \
-         tempfile.NamedTemporaryFile("w", suffix=".fa", delete=False) as tmp_null:
-        tmp_real_path = Path(tmp_real.name)
-        tmp_null_path = Path(tmp_null.name)
-
-    try:
-        records_df, _ = export_clean_fasta(args.records, tmp_real_path)
-        print(f"Exported {len(records_df)} real sequences to: {tmp_real_path}")
-
-        t0_shuf = time.time()
-        export_shuffled_fasta(records_df, tmp_null_path, seed=args.seed)
-        t1_shuf = time.time()
-        print(f"Generated exact dinucleotide-shuffled null FASTA in {t1_shuf - t0_shuf:.2f} seconds: {tmp_null_path}")
-
-        # 3. Extract landmarks
-        print("\n[Step 3/8] Extracting biological landmarks (TSS, 28S termination, ITS)...")
-        landmarks_df = extract_record_landmarks(records_df, args.regions)
-        print(f"Extracted landmarks for all {len(landmarks_df)} records.")
-
-        # 4. Run sliding-window local background scanning on real sequences
-        print(f"\n[Step 4/8] Scanning real sequences with local background (W={args.window_size} bp)...")
-        t0_scan_real = time.time()
-        real_hits_per_motif, _ = run_local_bg_scan(
-            fasta_path=tmp_real_path,
-            motifs=motifs,
-            window_size=args.window_size,
-            score_floor=args.score_floor,
-        )
-        t1_scan_real = time.time()
-        total_real_candidates = sum(len(df) for df in real_hits_per_motif.values())
-        print(f"Real scan completed in {t1_scan_real - t0_scan_real:.2f}s ({total_real_candidates:,} candidate hits >= {args.score_floor}).")
-
-        # 5. Run sliding-window local background scanning on shuffled null sequences
-        print(f"\n[Step 5/8] Scanning shuffled null sequences with local background (W={args.window_size} bp)...")
-        t0_scan_null = time.time()
-        null_hits_per_motif, _ = run_local_bg_scan(
-            fasta_path=tmp_null_path,
-            motifs=motifs,
-            window_size=args.window_size,
-            score_floor=args.score_floor,
-        )
-        t1_scan_null = time.time()
-        total_null_candidates = sum(len(df) for df in null_hits_per_motif.values())
-        print(f"Null scan completed in {t1_scan_null - t0_scan_null:.2f}s ({total_null_candidates:,} candidate hits >= {args.score_floor}).")
-
-    finally:
-        for p in [tmp_real_path, tmp_null_path]:
-            if p.is_file():
-                p.unlink()
-            fai = Path(str(p) + ".fai")
-            if fai.is_file():
-                fai.unlink()
-
-    # 6. Compute empirical False Discovery Rate (FDR) and filter hits
-    print(f"\n[Step 6/8] Calculating empirical FDR curves and filtering for FDR <= {args.fdr_thresh}...")
-    thresholds, filtered_hits_per_motif, fdr_summary_df = compute_empirical_fdr_thresholds(
-        real_hits_per_motif=real_hits_per_motif,
-        null_hits_per_motif=null_hits_per_motif,
-        trimming_df=trimming_df,
-        target_fdr=args.fdr_thresh,
-    )
-
-    fdr_tsv_path = output_dir / "fimo_fdr_summary.tsv"
-    fdr_summary_df.to_csv(fdr_tsv_path, sep="\t", index=False)
-    print(f"FDR summary saved to: {fdr_tsv_path}")
-    print(fdr_summary_df.to_string(index=False))
-
-    all_sig_list = [df for df in filtered_hits_per_motif.values() if len(df) > 0]
-    if all_sig_list:
-        combined_sig_hits = pd.concat(all_sig_list, ignore_index=True)
-    else:
-        combined_sig_hits = pd.DataFrame()
-
-    print(f"Total statistically significant FDR hits retained across all motifs: {len(combined_sig_hits):,}")
-
-    # 7. Annotate significant hits with landmarks and ground-truth features
-    print("\n[Step 7/8] Annotating FDR-significant hits with coordinates and biological compartments...")
-    annotated_fdr_hits = annotate_fimo_hits(combined_sig_hits, landmarks_df, args.regions)
 
     all_parquet_path = output_dir / "fimo_all_hits_annotated.parquet"
-    print(f"Saving annotated FDR hits to: {all_parquet_path}")
-    annotated_fdr_hits.to_parquet(all_parquet_path, index=False)
+    records_df = pd.read_parquet(args.records)
+    landmarks_df = extract_record_landmarks(records_df, args.regions)
 
-    # 8. Downstream conservation summary and publication plots
-    print("\n[Step 8/8] Building conservation summary and generating publication figures...")
+    if args.replot_only and all_parquet_path.is_file():
+        print(f"\n[--replot-only] Loading existing annotated FDR hits from: {all_parquet_path}")
+        annotated_fdr_hits = pd.read_parquet(all_parquet_path)
+    else:
+        print(trimming_df[["pattern_name", "orig_length", "trimmed_length", "trimmed_consensus"]].to_string(index=False))
+
+        # 2. Export clean temporary real FASTA and shuffled null FASTA
+        print("\n[Step 2/8] Exporting real and exact dinucleotide-shuffled null FASTAs...")
+        with tempfile.NamedTemporaryFile("w", suffix=".fa", delete=False) as tmp_real, \
+             tempfile.NamedTemporaryFile("w", suffix=".fa", delete=False) as tmp_null:
+            tmp_real_path = Path(tmp_real.name)
+            tmp_null_path = Path(tmp_null.name)
+
+        try:
+            records_df, _ = export_clean_fasta(args.records, tmp_real_path)
+            print(f"Exported {len(records_df)} real sequences to: {tmp_real_path}")
+
+            t0_shuf = time.time()
+            export_shuffled_fasta(records_df, tmp_null_path, seed=args.seed)
+            t1_shuf = time.time()
+            print(f"Generated exact dinucleotide-shuffled null FASTA in {t1_shuf - t0_shuf:.2f} seconds: {tmp_null_path}")
+
+            # 3. Extract landmarks
+            print("\n[Step 3/8] Extracting biological landmarks (TSS, 28S termination, ITS)...")
+            print(f"Extracted landmarks for all {len(landmarks_df)} records.")
+
+            # 4. Run sliding-window local background scanning on real sequences
+            print(f"\n[Step 4/8] Scanning real sequences with local background (W={args.window_size} bp)...")
+            t0_scan_real = time.time()
+            real_hits_per_motif, _ = run_local_bg_scan(
+                fasta_path=tmp_real_path,
+                motifs=motifs,
+                window_size=args.window_size,
+                score_floor=args.score_floor,
+            )
+            t1_scan_real = time.time()
+            total_real_candidates = sum(len(df) for df in real_hits_per_motif.values())
+            print(f"Real scan completed in {t1_scan_real - t0_scan_real:.2f}s ({total_real_candidates:,} candidate hits >= {args.score_floor}).")
+
+            # 5. Run sliding-window local background scanning on shuffled null sequences
+            print(f"\n[Step 5/8] Scanning shuffled null sequences with local background (W={args.window_size} bp)...")
+            t0_scan_null = time.time()
+            null_hits_per_motif, _ = run_local_bg_scan(
+                fasta_path=tmp_null_path,
+                motifs=motifs,
+                window_size=args.window_size,
+                score_floor=args.score_floor,
+            )
+            t1_scan_null = time.time()
+            total_null_candidates = sum(len(df) for df in null_hits_per_motif.values())
+            print(f"Null scan completed in {t1_scan_null - t0_scan_null:.2f}s ({total_null_candidates:,} candidate hits >= {args.score_floor}).")
+
+        finally:
+            for p in [tmp_real_path, tmp_null_path]:
+                if p.is_file():
+                    p.unlink()
+                fai = Path(str(p) + ".fai")
+                if fai.is_file():
+                    fai.unlink()
+
+        # 6. Compute empirical False Discovery Rate (FDR) and filter hits
+        print(f"\n[Step 6/8] Calculating empirical FDR curves and filtering for FDR <= {args.fdr_thresh}...")
+        thresholds, filtered_hits_per_motif, fdr_summary_df = compute_empirical_fdr_thresholds(
+            real_hits_per_motif=real_hits_per_motif,
+            null_hits_per_motif=null_hits_per_motif,
+            trimming_df=trimming_df,
+            target_fdr=args.fdr_thresh,
+        )
+
+        fdr_tsv_path = output_dir / "fimo_fdr_summary.tsv"
+        fdr_summary_df.to_csv(fdr_tsv_path, sep="\t", index=False)
+        print(f"FDR summary saved to: {fdr_tsv_path}")
+        print(fdr_summary_df.to_string(index=False))
+
+        all_sig_list = [df for df in filtered_hits_per_motif.values() if len(df) > 0]
+        if all_sig_list:
+            combined_sig_hits = pd.concat(all_sig_list, ignore_index=True)
+        else:
+            combined_sig_hits = pd.DataFrame()
+
+        print(f"Total statistically significant FDR hits retained across all motifs: {len(combined_sig_hits):,}")
+
+        # 7. Annotate significant hits with landmarks and ground-truth features
+        print("\n[Step 7/8] Annotating FDR-significant hits with coordinates and biological compartments...")
+        annotated_fdr_hits = annotate_fimo_hits(combined_sig_hits, landmarks_df, args.regions)
+
+        print(f"Saving annotated FDR hits to: {all_parquet_path}")
+        annotated_fdr_hits.to_parquet(all_parquet_path, index=False)
+
+    # 8. Downstream conservation summary and FIMO vs. MoDISco attribution comparison
+    print("\n[Step 8/8] Building conservation summary and FIMO vs. MoDISco attribution comparison...")
     pattern_order = sorted(consensus_dict.keys(), key=pattern_sort_key)
     fe_mat, comp_labels, comp_display_names = compute_regional_fold_enrichment(annotated_fdr_hits, pattern_order)
 
@@ -1534,21 +2011,51 @@ def main() -> None:
     print(f"Saving conservation summary to: {summary_tsv_path}")
     summary_df.to_csv(summary_tsv_path, sep="\t", index=False)
 
-    heatmap_png = output_dir / "regional_fold_enrichment_heatmap.png"
-    print(f"Generating Regional Fold-Enrichment Heatmap to: {heatmap_png}")
-    plot_regional_fold_enrichment_heatmap(summary_df, fe_mat, comp_display_names, heatmap_png)
+    seqlets_df, meta_df, resolved_meta = extract_modisco_seqlets_and_windows(
+        h5_path=args.modisco_h5,
+        metadata_path=args.metadata,
+        landmarks_df=landmarks_df,
+    )
+    comp_df = compare_fimo_vs_modisco_attribution(
+        annotated_fdr_hits=annotated_fdr_hits,
+        seqlets_df=seqlets_df,
+        meta_df=meta_df,
+        pattern_order=pattern_order,
+        comp_labels=comp_labels,
+    )
+    comp_tsv_path = output_dir / "fimo_vs_modisco_comparison.tsv"
+    print(f"Saving FIMO vs. MoDISco attribution comparison table to: {comp_tsv_path}")
+    comp_df.to_csv(comp_tsv_path, sep="\t", index=False)
 
-    counts_png = output_dir / "regional_counts_percentages_table.png"
-    print(f"Generating Regional Counts & Percentages Table to: {counts_png}")
-    plot_regional_counts_percentages_table(summary_df, comp_labels, comp_display_names, counts_png)
+    comp_png = output_dir / "fimo_vs_modisco_attribution_comparison.png"
+    print(f"Generating FIMO vs. MoDISco Attribution Comparison Plot to: {comp_png}")
+    plot_fimo_vs_modisco_attribution_comparison(comp_df, comp_labels, comp_display_names, comp_png)
 
-    prom_term_png = output_dir / "promoter_terminator_spatial_metaprofile.png"
-    print(f"Generating Promoter & Terminator Spatial Metaprofile to: {prom_term_png}")
-    plot_promoter_terminator_spatial_metaprofile(annotated_fdr_hits, prom_term_png)
+    # Active vs. Silent FIMO Hit Attribution Distribution
+    resolved_attr = args.attributions if args.attributions is not None else (resolved_meta.parent / "attributions.npz")
+    if not resolved_attr.is_file():
+        raise FileNotFoundError(f"Attributions file not found at: {resolved_attr}")
+    print(f"Loading per-position attributions from: {resolved_attr}")
+    att_npz = np.load(resolved_attr)
+    att_arr = att_npz["arr_0"]  # shape: (N_windows, 4, 400)
+    att_1d = np.sum(np.abs(att_arr), axis=1)  # shape: (N_windows, 400)
 
-    its2_png = output_dir / "its2_subdomain_architecture.png"
-    print(f"Generating ITS2 Subdomain Architecture to: {its2_png}")
-    plot_its2_subdomain_architecture(annotated_fdr_hits, its2_png)
+    act_sil_df, global_bg_stats = compute_active_vs_silent_fimo_attribution(
+        annotated_fdr_hits=annotated_fdr_hits,
+        seqlets_df=seqlets_df,
+        meta_df=meta_df,
+        att_1d=att_1d,
+        trimming_df=trimming_df,
+        summary_df=summary_df,
+        pattern_order=pattern_order,
+    )
+    act_sil_tsv = output_dir / "fimo_active_vs_silent_attribution.tsv"
+    print(f"Saving Active vs. Silent FIMO hit attribution summary to: {act_sil_tsv}")
+    act_sil_df.to_csv(act_sil_tsv, sep="\t", index=False)
+
+    act_sil_png = output_dir / "fimo_active_vs_silent_attribution_distribution.png"
+    print(f"Generating Active vs. Silent FIMO Hit Attribution Distribution plot to: {act_sil_png}")
+    plot_active_vs_silent_fimo_attribution(act_sil_df, global_bg_stats, act_sil_png)
 
     print("\n" + "=" * 120)
     print("Conservation Summary (FDR <= 0.05 Hits across 156 Mammalian rDNA Genomes):")

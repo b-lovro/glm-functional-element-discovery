@@ -30,9 +30,11 @@ import matplotlib
 matplotlib.use("Agg")
 from matplotlib.colors import ListedColormap
 import matplotlib.gridspec as gridspec
+from matplotlib.patches import FancyArrowPatch, Patch
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from scipy.stats import binomtest
 import seaborn as sns
 
 
@@ -681,11 +683,328 @@ def plot_seqlet_annotations_overlap_table(
     print(f"Seqlet annotations overlap summary table saved to: {output_png}")
 
 
+# Phylogenetically grouped 17 Mammalian Taxonomic Orders (Superorder -> Order)
+MAMMALIAN_ORDER_PHYLOGENY: List[Tuple[str, str]] = [
+    # Euarchontoglires
+    ("Euarchontoglires", "Primates"),
+    ("Euarchontoglires", "Rodentia"),
+    ("Euarchontoglires", "Lagomorpha"),
+    # Laurasiatheria
+    ("Laurasiatheria", "Artiodactyla"),
+    ("Laurasiatheria", "Perissodactyla"),
+    ("Laurasiatheria", "Carnivora"),
+    ("Laurasiatheria", "Pholidota"),
+    ("Laurasiatheria", "Chiroptera"),
+    ("Laurasiatheria", "Eulipotyphla"),
+    # Afrotheria
+    ("Afrotheria", "Proboscidea"),
+    ("Afrotheria", "Sirenia"),
+    ("Afrotheria", "Hyracoidea"),
+    ("Afrotheria", "Macroscelidea"),
+    # Xenarthra
+    ("Xenarthra", "Cingulata"),
+    ("Xenarthra", "Pilosa"),
+    # Marsupialia
+    ("Marsupialia", "Didelphimorphia"),
+    ("Marsupialia", "Dasyuromorphia"),
+]
+
+COMP_SHORT_NAMES: Dict[str, str] = {
+    "Core_Promoter_TSS": "Core Prom.",
+    "Upstream_Promoter": "UCE",
+    "5prime_ETS": "5' ETS",
+    "ITS1": "ITS1",
+    "ITS2": "ITS2",
+    "Terminator": "Terminator",
+    "Distal_IGS": "Distal IGS",
+}
+
+COMP_NODE_COLORS: Dict[str, str] = {
+    "Core_Promoter_TSS": "#d73027",
+    "Upstream_Promoter": "#fc8d59",
+    "5prime_ETS": "#4575b4",
+    "ITS1": "#66bd63",
+    "ITS2": "#1a9850",
+    "Terminator": "#762a83",
+    "Distal_IGS": "#878787",
+}
+
+
+def build_and_plot_phylogenetic_order_conservation(
+    final_df: pd.DataFrame,
+    comp_summary_df: pd.DataFrame,
+    meta_df: pd.DataFrame,
+    records_path: Path,
+    output_dir: Path,
+    dpi: int = 300,
+) -> pd.DataFrame:
+    """Computes and plots the 17-Mammalian-Order Phylogenetic Conservation Heatmap (strictly from TF-MoDISco seqlets)."""
+    # Collect all dataset species and their taxonomic order (from records.parquet if present, plus meta_df)
+    all_records = set(meta_df["record_id"].astype(str).unique().tolist())
+    if records_path.is_file():
+        rec_df = pd.read_parquet(records_path)
+        if "record_id" in rec_df.columns:
+            all_records.update(rec_df["record_id"].astype(str).unique().tolist())
+
+    order_to_all_species: Dict[str, List[str]] = {}
+    for rec_id in sorted(all_records):
+        parts = rec_id.split("-")
+        tax_order = parts[1] if len(parts) >= 2 else "Unknown"
+        if tax_order not in order_to_all_species:
+            order_to_all_species[tax_order] = []
+        order_to_all_species[tax_order].append(rec_id)
+
+    # Order columns phylogenetically
+    phylo_orders: List[str] = [o for _, o in MAMMALIAN_ORDER_PHYLOGENY if o in order_to_all_species]
+    for extra_o in sorted(order_to_all_species.keys()):
+        if extra_o not in phylo_orders:
+            phylo_orders.append(extra_o)
+
+    total_species_count = len(all_records)
+    total_orders_count = len(phylo_orders)
+
+    # Annotate final_df with tax_order
+    df_seq = final_df.copy()
+    df_seq["tax_order"] = [str(r).split("-")[1] if len(str(r).split("-")) >= 2 else "Unknown" for r in df_seq["record_id"]]
+
+    pattern_order = comp_summary_df["pattern_name"].tolist()
+    prim_comp_map: Dict[str, str] = {}
+    for _, row in comp_summary_df.iterrows():
+        prim_comp_map[str(row["pattern_name"])] = str(row["primary_enriched_compartment"])
+
+    num_patterns = len(pattern_order)
+    pct_mat = np.zeros((num_patterns, len(phylo_orders)), dtype=float)
+    annot_mat = np.empty((num_patterns, len(phylo_orders)), dtype=object)
+    summary_rows: List[Dict[str, Any]] = []
+
+    for i, pat in enumerate(pattern_order):
+        prim_comp = prim_comp_map[pat]
+        sub_all = df_seq[df_seq["pattern_name"] == pat]
+        sub_cons = sub_all[sub_all["fine_compartment"] == prim_comp]
+
+        any_species = sorted(sub_all["record_id"].unique().tolist())
+        cons_species = sorted(sub_cons["record_id"].unique().tolist())
+        any_orders = sorted(sub_all["tax_order"].unique().tolist())
+        cons_orders = sorted(sub_cons["tax_order"].unique().tolist())
+
+        row_dict: Dict[str, Any] = {
+            "pattern_name": pat,
+            "primary_conserved_compartment": prim_comp,
+            "total_seqlets": len(sub_all),
+            "conserved_comp_seqlets": len(sub_cons),
+            "conserved_comp_species_count": len(cons_species),
+            "conserved_comp_species_pct": round(len(cons_species) / max(1, total_species_count) * 100.0, 2),
+            "conserved_comp_orders_count": len(cons_orders),
+            "conserved_comp_orders_pct": round(len(cons_orders) / max(1, total_orders_count) * 100.0, 2),
+            "any_comp_species_count": len(any_species),
+            "any_comp_orders_count": len(any_orders),
+        }
+
+        for j, ord_name in enumerate(phylo_orders):
+            ord_tot = len(order_to_all_species[ord_name])
+            ord_hit = int(sub_cons[sub_cons["tax_order"] == ord_name]["record_id"].nunique())
+            ord_pct = (ord_hit / ord_tot * 100.0) if ord_tot > 0 else 0.0
+            pct_mat[i, j] = ord_pct
+            annot_mat[i, j] = f"{ord_hit}/{ord_tot}" if ord_hit > 0 else "-"
+            row_dict[f"{ord_name}_conserved_species"] = ord_hit
+            row_dict[f"{ord_name}_total_species"] = ord_tot
+            row_dict[f"{ord_name}_conserved_pct"] = round(ord_pct, 2)
+
+        summary_rows.append(row_dict)
+
+    phylo_df = pd.DataFrame(summary_rows)
+    phylo_tsv = output_dir / "seqlet_phylogenetic_order_conservation_summary.tsv"
+    phylo_df.to_csv(phylo_tsv, sep="\t", index=False)
+    print(f"17-Mammalian-Order phylogenetic conservation summary written to: {phylo_tsv}")
+
+    # Plot single-panel 17-Mammalian-Order Heatmap with pattern names & (species, orders) on the left
+    cons_sp = phylo_df["conserved_comp_species_count"].values
+    cons_ord = phylo_df["conserved_comp_orders_count"].values
+    y_labels = [
+        f"{format_pattern_display_name(pat)} ({c_s} sp, {c_o} ord)"
+        for pat, c_s, c_o in zip(pattern_order, cons_sp, cons_ord)
+    ]
+
+    fig_height = max(9.5, 0.42 * num_patterns + 2.5)
+    cbar_shrink = min(0.8, 10.0 / fig_height)
+
+    fig, ax_hm = plt.subplots(figsize=(17.5, fig_height), dpi=dpi, facecolor="white")
+
+    order_headers = [f"{o}\n(N={len(order_to_all_species[o])})" for o in phylo_orders]
+    sns.heatmap(
+        pct_mat,
+        ax=ax_hm,
+        cmap="YlGnBu",
+        vmin=0.0,
+        vmax=100.0,
+        annot=annot_mat,
+        fmt="",
+        annot_kws={"fontsize": 7.8, "weight": "bold"},
+        cbar_kws={
+            "label": "Species in Taxonomic Order Carrying Motif at Conserved Compartment (%)",
+            "shrink": cbar_shrink,
+            "aspect": 25,
+        },
+        linewidths=0.5,
+        linecolor="#dcdcdc",
+        yticklabels=y_labels,
+        xticklabels=order_headers,
+    )
+    ax_hm.set_xticklabels(order_headers, rotation=32, ha="right", fontsize=8.8, fontweight="bold")
+    ax_hm.tick_params(axis="y", labelsize=9.2, rotation=0)
+    for label in ax_hm.get_yticklabels():
+        label.set_fontweight("bold")
+    ax_hm.set_ylabel("")
+
+    # Draw vertical superorder boundary lines
+    superorder_map = dict((o, s) for s, o in MAMMALIAN_ORDER_PHYLOGENY)
+    for j in range(1, len(phylo_orders)):
+        s_prev = superorder_map[phylo_orders[j - 1]] if phylo_orders[j - 1] in superorder_map else ""
+        s_curr = superorder_map[phylo_orders[j]] if phylo_orders[j] in superorder_map else ""
+        if s_prev != s_curr:
+            ax_hm.axvline(j, color="#222222", linewidth=1.8, linestyle="-")
+
+    if num_patterns > 25:
+        secax = ax_hm.secondary_xaxis("top")
+        secax.set_xticks(np.arange(len(order_headers)) + 0.5)
+        secax.set_xticklabels(order_headers, rotation=32, ha="left", fontsize=8.8, fontweight="bold")
+
+    top_edge = ax_hm.get_position().y1
+    title_y = top_edge + (1.50 / fig_height) if num_patterns > 25 else 0.985
+    fig.suptitle(
+        "17-Mammalian-Order Phylogenetic Conservation Heatmap (TF-MoDISco High-Attribution Seqlets)\n"
+        "[Fraction (k/N) of Species per Mammalian Order Carrying Motif at Conserved Compartment]",
+        fontsize=12.5,
+        fontweight="bold",
+        y=title_y,
+    )
+
+    phylo_png = output_dir / "seqlet_phylogenetic_order_conservation_heatmap.png"
+    fig.savefig(phylo_png, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"17-Mammalian-Order phylogenetic conservation heatmap saved to: {phylo_png}")
+    return phylo_df
+
+
+def build_and_plot_strand_directionality_bias(
+    final_df: pd.DataFrame,
+    comp_summary_df: pd.DataFrame,
+    output_dir: Path,
+    dpi: int = 300,
+) -> pd.DataFrame:
+    """Computes and plots the uncolored Strand Directionality Bias table across all TF-MoDISco patterns."""
+    pattern_order = comp_summary_df["pattern_name"].tolist()
+
+    rows: List[Dict[str, Any]] = []
+    for pat in pattern_order:
+        sub_all = final_df[final_df["pattern_name"] == pat]
+        n_all = len(sub_all)
+        n_rev_all = int(sub_all["is_revcomp"].astype(int).sum()) if n_all > 0 else 0
+        n_fwd_all = n_all - n_rev_all
+        fwd_pct_all = (n_fwd_all / n_all * 100.0) if n_all > 0 else 50.0
+        p_binom_all = float(binomtest(n_fwd_all, n_all, p=0.5).pvalue) if n_all > 0 else 1.0
+
+        rows.append({
+            "pattern_name": pat,
+            "total_seqlets": n_all,
+            "fwd_strand_count": n_fwd_all,
+            "rev_strand_count": n_rev_all,
+            "fwd_strand_pct": round(fwd_pct_all, 2),
+            "rev_strand_pct": round(100.0 - fwd_pct_all, 2),
+            "binom_pval_all": p_binom_all,
+        })
+
+    strand_df = pd.DataFrame(rows)
+
+    # Benjamini-Hochberg FDR correction across patterns
+    m = len(strand_df)
+    pvals = strand_df["binom_pval_all"].values
+    order_idx = np.argsort(pvals)
+    qvals = np.empty(m, dtype=float)
+    prev_q = 1.0
+    for rank_rev in range(m - 1, -1, -1):
+        orig_i = order_idx[rank_rev]
+        q = min(prev_q, pvals[orig_i] * m / (rank_rev + 1))
+        qvals[orig_i] = q
+        prev_q = q
+    strand_df["binom_fdr_qval_all"] = qvals
+
+    strand_tsv = output_dir / "seqlet_strand_directionality_summary.tsv"
+    strand_df.to_csv(strand_tsv, sep="\t", index=False)
+    print(f"Strand directionality summary written to: {strand_tsv}")
+
+    # Plot single uncolored table with pattern names on the left and 3 columns
+    num_patterns = len(pattern_order)
+    display_names = [format_pattern_display_name(p) for p in pattern_order]
+    fig_height = max(9.5, 0.40 * num_patterns + 2.3)
+
+    fig, ax_tbl = plt.subplots(figsize=(8.2, fig_height), dpi=dpi, facecolor="white")
+
+    tbl_headers = [
+        "Strand Counts\n(+ Fwd / - Rev)",
+        "All Seqlets\nFwd Strand (%)",
+        "Binomial Test\nFDR q-value",
+    ]
+    annot_mat = np.empty((num_patterns, len(tbl_headers)), dtype=object)
+
+    for i, (_, row) in enumerate(strand_df.iterrows()):
+        nf = int(row["fwd_strand_count"])
+        nr = int(row["rev_strand_count"])
+        fp_all = float(row["fwd_strand_pct"])
+        qv = float(row["binom_fdr_qval_all"])
+        stars = "***" if qv < 1e-4 else ("**" if qv < 1e-2 else ("*" if qv < 0.05 else ""))
+
+        annot_mat[i, 0] = f"+{nf} / -{nr}"
+        annot_mat[i, 1] = f"{fp_all:.1f}%"
+        annot_mat[i, 2] = f"{qv:.1e}{stars}"
+
+    cmap_white = ListedColormap(["#ffffff"])
+    sns.heatmap(
+        np.zeros((num_patterns, len(tbl_headers))),
+        ax=ax_tbl,
+        cmap=cmap_white,
+        annot=annot_mat,
+        fmt="",
+        annot_kws={"fontsize": 8.4, "weight": "bold", "color": "#111111"},
+        cbar=False,
+        linewidths=0.7,
+        linecolor="#d0d0d0",
+        yticklabels=display_names,
+        xticklabels=tbl_headers,
+    )
+    ax_tbl.set_xticklabels(tbl_headers, rotation=25, ha="right", fontsize=9.5, fontweight="bold")
+    ax_tbl.tick_params(axis="y", labelsize=9.5, rotation=0)
+    for label in ax_tbl.get_yticklabels():
+        label.set_fontweight("bold")
+    ax_tbl.set_ylabel("")
+
+    if num_patterns > 25:
+        secax = ax_tbl.secondary_xaxis("top")
+        secax.set_xticks(np.arange(len(tbl_headers)) + 0.5)
+        secax.set_xticklabels(tbl_headers, rotation=25, ha="left", fontsize=9.5, fontweight="bold")
+
+    top_edge = ax_tbl.get_position().y1
+    title_y = top_edge + (1.35 / fig_height) if num_patterns > 25 else 0.985
+    fig.suptitle(
+        "TF-MoDISco Motif Strand Directionality Bias Relative to rDNA Transcription",
+        fontsize=12.5,
+        fontweight="bold",
+        y=title_y,
+    )
+
+    strand_png = output_dir / "seqlet_strand_directionality_bias.png"
+    fig.savefig(strand_png, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Strand directionality bias plot saved to: {strand_png}")
+    return strand_df
+
+
 def map_motifs(
     results_path: Path,
     metadata_path: Path,
     regions_path: Path,
     output_dir: Path,
+    records_path: Path = Path("data/prepared/ribosome/records.parquet"),
     pattern_filter: str | None = None,
     include_percentages: bool = True,
     plot_heatmap: bool = True,
@@ -914,6 +1233,22 @@ def map_motifs(
             output_png=annot_table_png,
         )
 
+        print("Generating 17-Mammalian-Order Phylogenetic Conservation Heatmap...")
+        build_and_plot_phylogenetic_order_conservation(
+            final_df=final_df,
+            comp_summary_df=comp_summary_df,
+            meta_df=meta_df,
+            records_path=records_path,
+            output_dir=output_dir,
+        )
+
+        print("Generating Strand Directionality Bias Plot...")
+        build_and_plot_strand_directionality_bias(
+            final_df=final_df,
+            comp_summary_df=comp_summary_df,
+            output_dir=output_dir,
+        )
+
     return final_df, summary_df, comp_summary_df
 
 
@@ -941,6 +1276,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/prepared/ribosome/regions.parquet"),
         help="Path to annotations parquet file (default: data/prepared/ribosome/regions.parquet)",
+    )
+    parser.add_argument(
+        "--records",
+        type=Path,
+        default=Path("data/prepared/ribosome/records.parquet"),
+        help="Path to dataset records parquet file (default: data/prepared/ribosome/records.parquet)",
     )
     parser.add_argument(
         "--output",
@@ -977,6 +1318,7 @@ def main() -> None:
         metadata_path=args.metadata,
         regions_path=args.regions,
         output_dir=args.output,
+        records_path=args.records,
         pattern_filter=args.pattern,
         include_percentages=args.include_percentages,
         plot_heatmap=args.plot_heatmap,

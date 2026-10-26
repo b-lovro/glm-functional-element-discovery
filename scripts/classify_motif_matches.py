@@ -35,6 +35,7 @@ import argparse
 import logging
 import math
 import random
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -121,6 +122,27 @@ def parse_motifs_html_table(report_dir: Path, dataset_name: str) -> pd.DataFrame
     return df
 
 
+def is_motif_filtered(raw_match: str, filter_motifs: List[str]) -> bool:
+    """Check if a motif identifier matches any filtered TF/motif name on token boundaries.
+
+    Tokenizes the motif string on non-alphanumeric characters (whitespace, '_', '.', ':')
+    so that filtering 'SP1' matches 'MA0079.5 SP1' and 'SP1_HUMAN.H11MO.0.A' without
+    falsely matching 'SPI1_HUMAN' or 'MA2540.1 SP140L', and 'CTCF' matches 'CTCF'
+    without falsely matching 'CTCFL'.
+    """
+    if not filter_motifs:
+        return False
+    upper_match = raw_match.upper()
+    tokens = set(re.split(r"[^A-Z0-9]+", upper_match))
+    for filter_kw in filter_motifs:
+        kw = filter_kw.strip().upper()
+        if not kw:
+            continue
+        if kw in tokens or kw == upper_match:
+            return True
+    return False
+
+
 def extract_candidate_matches(
     pattern_row: pd.Series,
     dataset_name: str,
@@ -133,7 +155,7 @@ def extract_candidate_matches(
         pattern_row: Single row from the parsed motifs DataFrame.
         dataset_name: Name of the reference dataset.
         top_n: Number of top matches to consider (1, 2, or 3).
-        filter_motifs: List of substrings to filter out (e.g. ['CTCF']).
+        filter_motifs: List of motif tokens to filter out (e.g. ['CTCF', 'SP1', 'SP2', 'SP3', 'SP4']).
 
     Returns:
         List of tuples: (p_value, motif_name, dataset_name), sorted ascending by p_value.
@@ -163,13 +185,7 @@ def extract_candidate_matches(
             continue
 
         # Check if motif is filtered out
-        is_filtered = False
-        for filter_kw in filter_motifs:
-            if filter_kw.upper() in raw_match.upper():
-                is_filtered = True
-                break
-
-        if is_filtered:
+        if is_motif_filtered(raw_match, filter_motifs):
             continue
 
         try:
@@ -194,8 +210,7 @@ def classify_all_patterns(
     reports_data: Dict[str, pd.DataFrame],
     dna_datasets: List[str],
     rna_datasets: List[str],
-    dna_p_threshold: float,
-    rna_p_threshold: float,
+    db_p_thresholds: Dict[str, float],
     filter_motifs: List[str],
     top_n: int,
     ranking_mode: str = "calibrated_p",
@@ -207,8 +222,8 @@ def classify_all_patterns(
         reports_data: Dictionary mapping dataset_name -> parsed report DataFrame.
         dna_datasets: List of dataset names representing DNA references.
         rna_datasets: List of dataset names representing RNA references.
-        dna_p_threshold: Maximum p-value for DNA matches (calibrated for longer TF/repeat motifs).
-        rna_p_threshold: Maximum p-value for RNA matches (calibrated for short 7-8bp RBP motifs).
+        db_p_thresholds: Dictionary mapping dataset_name -> maximum p-value threshold
+            (calibrated for each database's size N and motif width distribution).
         filter_motifs: List of motif names/substrings to filter out.
         top_n: Number of matches to consider per report (1 to 3).
         ranking_mode: Classification mode ('calibrated_p' or 'percentile').
@@ -220,9 +235,13 @@ def classify_all_patterns(
     for dset in dna_datasets:
         if dset not in reports_data:
             raise KeyError(f"DNA dataset '{dset}' not found in loaded reports: {list(reports_data.keys())}")
+        if dset not in db_p_thresholds:
+            raise KeyError(f"DNA dataset '{dset}' missing from db_p_thresholds: {list(db_p_thresholds.keys())}")
     for dset in rna_datasets:
         if dset not in reports_data:
             raise KeyError(f"RNA dataset '{dset}' not found in loaded reports: {list(reports_data.keys())}")
+        if dset not in db_p_thresholds:
+            raise KeyError(f"RNA dataset '{dset}' missing from db_p_thresholds: {list(db_p_thresholds.keys())}")
 
     # Determine master list of pattern names from the first available report
     first_report_key = list(reports_data.keys())[0]
@@ -251,8 +270,10 @@ def classify_all_patterns(
                     extract_candidate_matches(match_rows.iloc[0], dname, top_n, filter_motifs)
                 )
 
-        dna_hits.sort(key=lambda hit: hit[0])
-        rna_hits.sort(key=lambda hit: hit[0])
+        # Sort hits by database-calibrated threshold ratio (equivalent to E-value ranking),
+        # breaking ties by raw p-value.
+        dna_hits.sort(key=lambda hit: (hit[0] / db_p_thresholds[hit[2]], hit[0]))
+        rna_hits.sort(key=lambda hit: (hit[0] / db_p_thresholds[hit[2]], hit[0]))
 
         best_dna = dna_hits[0] if dna_hits else (float("inf"), "None", "None")
         best_rna = rna_hits[0] if rna_hits else (float("inf"), "None", "None")
@@ -321,6 +342,8 @@ def classify_all_patterns(
     for _, row in df_patterns.iterrows():
         dna_pval = row["best_dna_pval"]
         rna_pval = row["best_rna_pval"]
+        dna_ds = row["best_dna_dataset"]
+        rna_ds = row["best_rna_dataset"]
         dna_pct = row["best_dna_percentile"]
         rna_pct = row["best_rna_percentile"]
 
@@ -334,34 +357,37 @@ def classify_all_patterns(
                 pv = np.nan
                 ds = "None"
             elif rna_sig and not dna_sig:
-                cat = "RNA_match"
                 mod = "RNA"
                 mat = row["best_rna_match"]
                 pv = rna_pval
-                ds = row["best_rna_dataset"]
+                ds = rna_ds
+                cat = f"RNA_match ({ds})"
             elif dna_sig and not rna_sig:
-                cat = "DNA_match"
                 mod = "DNA"
                 mat = row["best_dna_match"]
                 pv = dna_pval
-                ds = row["best_dna_dataset"]
+                ds = dna_ds
+                cat = f"DNA_match ({ds})"
             else:
                 if rna_pct > dna_pct:
-                    cat = "RNA_match"
                     mod = "RNA"
                     mat = row["best_rna_match"]
                     pv = rna_pval
-                    ds = row["best_rna_dataset"]
+                    ds = rna_ds
+                    cat = f"RNA_match ({ds})"
                 else:
-                    cat = "DNA_match"
                     mod = "DNA"
                     mat = row["best_dna_match"]
                     pv = dna_pval
-                    ds = row["best_dna_dataset"]
+                    ds = dna_ds
+                    cat = f"DNA_match ({ds})"
         else:
-            # Default: calibrated_p mode using modality-specific p-value thresholds
-            dna_sig = dna_pval <= dna_p_threshold
-            rna_sig = rna_pval <= rna_p_threshold
+            # Default: calibrated_p mode using per-database p-value thresholds
+            dna_thresh = db_p_thresholds[dna_ds] if dna_ds in db_p_thresholds else float("inf")
+            rna_thresh = db_p_thresholds[rna_ds] if rna_ds in db_p_thresholds else float("inf")
+
+            dna_sig = dna_pval <= dna_thresh
+            rna_sig = rna_pval <= rna_thresh
 
             if not dna_sig and not rna_sig:
                 cat = "No_close_match"
@@ -370,32 +396,32 @@ def classify_all_patterns(
                 pv = np.nan
                 ds = "None"
             elif rna_sig and not dna_sig:
-                cat = "RNA_match"
                 mod = "RNA"
                 mat = row["best_rna_match"]
                 pv = rna_pval
-                ds = row["best_rna_dataset"]
+                ds = rna_ds
+                cat = f"RNA_match ({ds})"
             elif dna_sig and not rna_sig:
-                cat = "DNA_match"
                 mod = "DNA"
                 mat = row["best_dna_match"]
                 pv = dna_pval
-                ds = row["best_dna_dataset"]
+                ds = dna_ds
+                cat = f"DNA_match ({ds})"
             else:
-                rna_ratio = rna_pval / rna_p_threshold
-                dna_ratio = dna_pval / dna_p_threshold
+                rna_ratio = rna_pval / rna_thresh
+                dna_ratio = dna_pval / dna_thresh
                 if rna_ratio < dna_ratio:
-                    cat = "RNA_match"
                     mod = "RNA"
                     mat = row["best_rna_match"]
                     pv = rna_pval
-                    ds = row["best_rna_dataset"]
+                    ds = rna_ds
+                    cat = f"RNA_match ({ds})"
                 else:
-                    cat = "DNA_match"
                     mod = "DNA"
                     mat = row["best_dna_match"]
                     pv = dna_pval
-                    ds = row["best_dna_dataset"]
+                    ds = dna_ds
+                    cat = f"DNA_match ({ds})"
 
         categories.append(cat)
         best_modalities.append(mod)
@@ -439,34 +465,39 @@ def classify_all_patterns(
 
 
 def print_classification_summary(
-    classified_df: pd.DataFrame, dna_p_threshold: float, rna_p_threshold: float
+    classified_df: pd.DataFrame, db_p_thresholds: Dict[str, float]
 ) -> None:
     """Print clean formatted breakdown of the 3 pattern lists to stdout."""
-    categories = ["RNA_match", "DNA_match", "No_close_match"]
-    counts = {cat: (classified_df["category"] == cat).sum() for cat in categories}
+    rna_count = int(classified_df["category"].str.startswith("RNA_match").sum())
+    dna_count = int(classified_df["category"].str.startswith("DNA_match").sum())
+    no_match_count = int((classified_df["category"] == "No_close_match").sum())
+    thresh_summary = ", ".join(f"{k} <= {v:.1e}" for k, v in db_p_thresholds.items())
 
     print("\n" + "=" * 80)
-    print(
-        f"TF-MoDISco Pattern Modality Classification Summary "
-        f"(DNA p <= {dna_p_threshold:.1e}, RNA p <= {rna_p_threshold:.1e})"
-    )
+    print(f"TF-MoDISco Pattern Modality Classification Summary ({thresh_summary})")
     print("=" * 80)
     print(
         f"Total Patterns: {len(classified_df)} | "
-        f"RNA matches: {counts['RNA_match']} | "
-        f"DNA matches: {counts['DNA_match']} | "
-        f"No close match: {counts['No_close_match']}"
+        f"RNA matches: {rna_count} | "
+        f"DNA matches: {dna_count} | "
+        f"No close match: {no_match_count}"
     )
     print("-" * 80)
 
-    for cat in categories:
-        subset = classified_df[classified_df["category"] == cat]
-        print(f"\n[Category: {cat}] ({len(subset)} patterns):")
+    category_groups = [
+        ("RNA_match", classified_df[classified_df["category"].str.startswith("RNA_match")]),
+        ("DNA_match", classified_df[classified_df["category"].str.startswith("DNA_match")]),
+        ("No_close_match", classified_df[classified_df["category"] == "No_close_match"]),
+    ]
+
+    for cat_label, subset in category_groups:
+        print(f"\n[Category: {cat_label}] ({len(subset)} patterns):")
         if subset.empty:
             print("  (none)")
             continue
         for _, row in subset.iterrows():
             pat = row["pattern"]
+            row_cat = row["category"]
             best_mod = row["best_overall_modality"]
             best_mat = row["best_overall_match"]
             best_pv = row["best_overall_pval"]
@@ -479,7 +510,7 @@ def print_classification_summary(
             rna_str = f"{rna_pv:.2e}" if pd.notna(rna_pv) else "N/A"
 
             print(
-                f"  - {pat:24s} -> Best: [{best_mod}] {best_mat} "
+                f"  - {pat:24s} [{row_cat}] -> Best: [{best_mod}] {best_mat} "
                 f"(p={pv_str}, dataset={best_ds}) | Best DNA p={dna_str} | Best RNA p={rna_str}"
             )
     print("\n" + "=" * 80 + "\n")
@@ -650,22 +681,46 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Folder name for Ray2013 RBP report within input-dir (default: report_rbp)",
     )
     parser.add_argument(
-        "--dna-p-threshold",
+        "--jaspar-p-threshold",
+        type=float,
+        default=5e-5,
+        help="Maximum p-value for JASPAR matches (default: 5e-5, calibrated for N=1019 motifs at Bonferroni alpha=0.05).",
+    )
+    parser.add_argument(
+        "--hocomoco-p-threshold",
+        type=float,
+        default=1e-4,
+        help="Maximum p-value for HOCOMOCO matches (default: 1e-4, calibrated for N=401 motifs at Bonferroni alpha=0.05).",
+    )
+    parser.add_argument(
+        "--dfam-p-threshold",
         type=float,
         default=1e-5,
-        help="Maximum p-value for DNA matches (JASPAR/HOCOMOCO/DFAM; default: 1e-5, calibrated for 14-25bp motifs).",
+        help="Maximum p-value for DFAM matches (default: 1e-5, calibrated for N=6345 repeat motifs at Bonferroni alpha=0.05).",
+    )
+    parser.add_argument(
+        "--rbp-p-threshold",
+        type=float,
+        default=5e-4,
+        help="Maximum p-value for Ray2013 RBP matches (default: 5e-4, calibrated for N=102 7-8bp motifs at Bonferroni alpha=0.05).",
+    )
+    parser.add_argument(
+        "--dna-p-threshold",
+        type=float,
+        default=None,
+        help="Optional p-value threshold overriding all DNA databases (--jaspar-p-threshold, --hocomoco-p-threshold, --dfam-p-threshold).",
     )
     parser.add_argument(
         "--rna-p-threshold",
         type=float,
-        default=5e-4,
-        help="Maximum p-value for RNA matches (Ray2013 RBP; default: 5e-4, calibrated for short 7-8bp motifs).",
+        default=None,
+        help="Optional p-value threshold overriding all RNA databases (--rbp-p-threshold).",
     )
     parser.add_argument(
         "--p-threshold",
         type=float,
         default=None,
-        help="Uniform p-value threshold overriding both --dna-p-threshold and --rna-p-threshold if provided.",
+        help="Uniform p-value threshold overriding all per-database and modality thresholds if provided.",
     )
     parser.add_argument(
         "--filter-ctcf",
@@ -682,15 +737,22 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--filter-sp",
+        dest="filter_sp",
         action="store_true",
-        default=False,
-        help="Filter out promiscuous GC-box SP-family matches (SP1, SP2, SP3, SP4).",
+        default=True,
+        help="Filter out promiscuous GC-box SP-family matches (SP1, SP2, SP3, SP4; default: True).",
+    )
+    parser.add_argument(
+        "--no-filter-sp",
+        dest="filter_sp",
+        action="store_false",
+        help="Do not filter out SP-family matches.",
     )
     parser.add_argument(
         "--exclude-motifs",
         type=str,
         default="",
-        help="Comma-separated substrings of motif names to ignore/filter (e.g. 'CTCF,SP2').",
+        help="Comma-separated motif tokens to ignore/filter (e.g. 'CTCF,SP2').",
     )
     parser.add_argument(
         "--exclude-datasets",
@@ -710,9 +772,9 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=str,
         default="calibrated_p",
         choices=["calibrated_p", "percentile"],
-        help="Classification strategy: 'calibrated_p' uses modality-specific p-value thresholds "
-             "(DNA <= 1e-5, RNA <= 5e-4); 'percentile' classifies based on empirical database percentile "
-             "ranking across the run (default: calibrated_p).",
+        help="Classification strategy: 'calibrated_p' uses database-specific p-value thresholds "
+             "(jaspar <= 5e-5, hocomoco <= 1e-4, dfam <= 1e-5, rbp <= 5e-4); "
+             "'percentile' classifies based on empirical database percentile ranking across the run (default: calibrated_p).",
     )
     parser.add_argument(
         "--min-percentile",
@@ -802,33 +864,44 @@ def main(argv: Optional[List[str]] = None) -> int:
     if filter_motifs:
         logger.info("Filtering out motifs matching: %s", filter_motifs)
 
-    # Determine thresholds (p_threshold overrides modality-specific thresholds if set)
+    # Determine per-database thresholds (with optional modality or uniform overrides)
+    db_p_thresholds: Dict[str, float] = {
+        "jaspar": args.jaspar_p_threshold,
+        "hocomoco": args.hocomoco_p_threshold,
+        "dfam": args.dfam_p_threshold,
+        "rbp": args.rbp_p_threshold,
+    }
+    if args.dna_p_threshold is not None:
+        for d in ["jaspar", "hocomoco", "dfam"]:
+            db_p_thresholds[d] = args.dna_p_threshold
+    if args.rna_p_threshold is not None:
+        db_p_thresholds["rbp"] = args.rna_p_threshold
     if args.p_threshold is not None:
-        dna_p_threshold = args.p_threshold
-        rna_p_threshold = args.p_threshold
-    else:
-        dna_p_threshold = args.dna_p_threshold
-        rna_p_threshold = args.rna_p_threshold
+        for d in db_p_thresholds:
+            db_p_thresholds[d] = args.p_threshold
+
+    active_thresholds = {
+        d: db_p_thresholds[d] for d in reports_data.keys()
+    }
+    thresh_log_str = ", ".join(f"{k} <= {v:.1e}" for k, v in active_thresholds.items())
 
     # Run classification
     logger.info(
         "Classifying patterns across %d DNA datasets (%s) and %d RNA datasets (%s) "
-        "[mode=%s, DNA p <= %s, RNA p <= %s, min_percentile=%.1f%%]...",
+        "[mode=%s, thresholds: %s, min_percentile=%.1f%%]...",
         len(dna_datasets),
         ", ".join(dna_datasets),
         len(rna_datasets),
         ", ".join(rna_datasets),
         args.ranking_mode,
-        dna_p_threshold,
-        rna_p_threshold,
+        thresh_log_str,
         args.min_percentile,
     )
     classified_df = classify_all_patterns(
         reports_data=reports_data,
         dna_datasets=dna_datasets,
         rna_datasets=rna_datasets,
-        dna_p_threshold=dna_p_threshold,
-        rna_p_threshold=rna_p_threshold,
+        db_p_thresholds=active_thresholds,
         filter_motifs=filter_motifs,
         top_n=args.top_n,
         ranking_mode=args.ranking_mode,
@@ -847,7 +920,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         plot_pattern_classification_table(classified_df, output_png, dpi=args.dpi)
 
     # Print summary lists to stdout
-    print_classification_summary(classified_df, dna_p_threshold, rna_p_threshold)
+    print_classification_summary(classified_df, active_thresholds)
 
     return 0
 
