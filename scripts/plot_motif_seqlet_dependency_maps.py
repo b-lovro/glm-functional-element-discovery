@@ -245,14 +245,45 @@ def select_top_exemplar_seqlets(
     return selected
 
 
+def compute_reconstruction_ic_matrix(recon: Optional[np.ndarray], seq_str: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Computes per-position reconstruction probabilities and IC in bits (L, 4) and (L,)."""
+    map_size = len(seq_str)
+    if recon is not None:
+        p_safe = np.clip(recon, 1e-7, 1.0)
+        p_safe = p_safe / np.sum(p_safe, axis=1, keepdims=True)
+        entropy = -np.sum(p_safe * np.log2(p_safe), axis=1)  # (L,)
+        ic_bits = np.clip(2.0 - entropy, 0.0, 2.0)  # (L,)
+        logo_matrix = p_safe * ic_bits[:, np.newaxis]  # (L, 4)
+        return logo_matrix, ic_bits
+    lut = {"A": 0, "C": 1, "G": 2, "T": 3}
+    logo_matrix = np.zeros((map_size, 4), dtype=float)
+    for idx, base in enumerate(seq_str):
+        if base in lut:
+            logo_matrix[idx, lut[base]] = 1.0
+    return logo_matrix, np.ones(map_size, dtype=float)
+
+
+def move_rinalmo_adapter(seq_model: Any, target_device: torch.device) -> None:
+    """Moves RiNALMoSequenceModel weights and index tensors to target_device."""
+    seq_model.device = target_device
+    seq_model.model = seq_model.model.to(target_device)
+    seq_model.nucleotide_token_indices = seq_model.nucleotide_token_indices.to(target_device)
+    seq_model.canonical_nucleotide_token_indices = seq_model.canonical_nucleotide_token_indices.to(target_device)
+    seq_model.random_replace_indices = seq_model.random_replace_indices.to(target_device)
+
+
 def render_and_save_dependency_map_plot(
-    dm: DependencyMap,
+    dep_map: np.ndarray,
+    logo_matrix: np.ndarray,
     seqlet_info: Dict[str, Any],
     record_sequence: str,
     map_start: int,
     map_end: int,
     regions_df: pd.DataFrame,
     output_png: Path,
+    map_type_title: str = "RiNALMo Adapted Nucleotide Dependency Map",
+    cbar_label: str = "Adapted Nucleotide Dependency",
+    logo_ylabel: str = "Bits",
     scale: int = 3,
 ) -> None:
     """Renders 200x200 dependency map in the plot_annotated_dependency_map style and saves as PNG.
@@ -277,27 +308,8 @@ def render_and_save_dependency_map_plot(
     pattern_display = format_pattern_display_name(pattern_name)
     rank = seqlet_info["rank"]
 
-    # 1. Zero-out the diagonal for dependency map
-    dep_map = dm.get_depenency_map_without_diagonal()
+    # 1. Clip dependency map to [0.0, 5.0]
     dep_map_clipped = np.clip(dep_map, 0.0, 5.0)
-
-    # 2. Compute Reconstruction IC Logo matrix (L, 4) in bits
-    # IC_x = 2 - H(p_x)
-    recon = dm.reconstruction  # shape: (200, 4)
-    if recon is not None:
-        p_safe = np.clip(recon, 1e-7, 1.0)
-        p_safe = p_safe / np.sum(p_safe, axis=1, keepdims=True)
-        entropy = -np.sum(p_safe * np.log2(p_safe), axis=1)  # (L,)
-        ic_bits = np.clip(2.0 - entropy, 0.0, 2.0)  # (L,)
-        logo_matrix = p_safe * ic_bits[:, np.newaxis]  # (L, 4)
-    else:
-        # Fallback to one-hot sequence logo
-        lut = {"A": 0, "C": 1, "G": 2, "T": 3}
-        logo_matrix = np.zeros((map_size, 4), dtype=float)
-        for idx, base in enumerate(seq_200):
-            if base in lut:
-                logo_matrix[idx, lut[base]] = 1.0
-
     logo_df = pd.DataFrame(logo_matrix, columns=["A", "C", "G", "T"])
 
     # 3. Create matplotlib figure with 3 vertically stacked axes
@@ -329,7 +341,7 @@ def render_and_save_dependency_map_plot(
     logomaker.Logo(logo_df, ax=ax_logo, color_scheme=color_scheme, vpad=0.02)
     ax_logo.set_xlim(-0.5, map_size - 0.5)
     ax_logo.set_ylim(0.0, 2.05)
-    ax_logo.set_ylabel("Bits", fontsize=9, fontweight="bold")
+    ax_logo.set_ylabel(logo_ylabel, fontsize=9, fontweight="bold")
     ax_logo.set_xticks([])
     ax_logo.tick_params(axis="y", labelsize=8)
     ax_logo.spines["top"].set_visible(False)
@@ -426,7 +438,7 @@ def render_and_save_dependency_map_plot(
     # Colorbar
     cbar_ax = fig.add_axes([0.825, 0.25, 0.02, 0.45])
     cbar = fig.colorbar(im, cax=cbar_ax)
-    cbar.set_label("Nucleotide Dependency", fontsize=9, fontweight="bold")
+    cbar.set_label(cbar_label, fontsize=9, fontweight="bold")
     cbar.ax.tick_params(labelsize=8)
 
     # Legend
@@ -459,7 +471,7 @@ def render_and_save_dependency_map_plot(
     # Title & Subtitle (4 clean lines, well spaced without clipping)
     clade_str = f" ({seqlet_info['order_clade']})" if ("order_clade" in seqlet_info and seqlet_info["order_clade"]) else ""
     fig.suptitle(
-        f"{pattern_display} (Exemplar #{rank}) — 200×200 RiNALMo Nucleotide Dependency Map\n"
+        f"{pattern_display} (Exemplar #{rank}) — 200×200 {map_type_title}\n"
         f"Species: {seqlet_info['species']}{clade_str} | Region: [{map_start:,}, {map_end:,}) bp\n"
         f"50-bp Consensus Match: {seqlet_info['exact_matches_50']}/50 bp ({seqlet_info['match_fraction_50']*100:.1f}%) | "
         f"Mean Attr: {seqlet_info['attr_mean_50']:.1f} | PWM Score: {seqlet_info['pwm_score_50']:.1f}\n"
@@ -649,15 +661,23 @@ def main(argv: Optional[List[str]] = None) -> int:
         oh_key = list(oh_npz.keys())[0]
         one_hot_arr = oh_npz[oh_key]  # shape: (N_windows, 4, 400)
 
-        # Load RiNALMo-mega + LoRA weights
-        logger.info("Loading RiNALMo (%s) from %s with LoRA from %s...", args.model_size, args.weights, args.lora_weights)
-        model = load_rinalmo_model(
+        # Load RiNALMo-mega Adapted (+LoRA) and Base models onto CPU initially
+        target_device = torch.device(args.device)
+        logger.info("Loading Adapted RiNALMo (%s) from %s with LoRA from %s...", args.model_size, args.weights, args.lora_weights)
+        adapted_model = load_rinalmo_model(
             model_size=args.model_size,
             weights_path=args.weights,
-            device=args.device,
+            device="cpu",
             lora_weights_path=args.lora_weights,
         )
-        logger.info("Model and LoRA weights loaded and merged successfully on %s.", args.device)
+        logger.info("Loading Base RiNALMo (%s) from %s (no LoRA)...", args.model_size, args.weights)
+        base_model = load_rinalmo_model(
+            model_size=args.model_size,
+            weights_path=args.weights,
+            device="cpu",
+            lora_weights_path=None,
+        )
+        logger.info("Both Adapted and Base RiNALMo models loaded successfully (active inference device: %s).", args.device)
 
         # Select patterns to process
         pattern_groups = ["pos_patterns", "neg_patterns"]
@@ -669,7 +689,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 grp = f[grp_name]
                 for p_name in sorted(grp.keys(), key=pattern_sort_key):
                     full_p = f"{grp_name}.{p_name}"
-                    if args.patterns is None or full_p in args.patterns or p_name in args.patterns:
+                    p_num = p_name.replace("pattern_", "")
+                    short_alias = p_name if grp_name == "pos_patterns" else f"neg_{p_name}"
+                    num_alias = p_num if grp_name == "pos_patterns" else f"neg_{p_num}"
+                    if (
+                        args.patterns is None
+                        or full_p in args.patterns
+                        or short_alias in args.patterns
+                        or num_alias in args.patterns
+                    ):
                         all_pattern_names.append(full_p)
 
         logger.info("Processing %d motif pattern(s) with top-%d exemplar seqlets each...", len(all_pattern_names), args.top_k)
@@ -709,11 +737,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         summary_df.to_csv(summary_tsv, sep="\t", index=False)
         logger.info("Saved selected exemplar seqlets metadata table to: %s", summary_tsv)
 
-        # Compute dependency maps and render plots
+        # Compute dependency maps and render both Adapted and Delta plots
         def tokenize_func(sequence: str, mask: Optional[int]) -> object:
-            return model.dependency_tokenize(sequence, mask)
+            return adapted_model.dependency_tokenize(sequence, mask)
 
-        forward_func = partial(model.dependency_forward, batch_size=args.batch_size)
+        forward_adapted = partial(adapted_model.dependency_forward, batch_size=args.batch_size)
+        forward_base = partial(base_model.dependency_forward, batch_size=args.batch_size)
+        cpu_device = torch.device("cpu")
 
         for seqlet in all_selected_seqlets:
             pat_name = seqlet["pattern_name"]
@@ -742,18 +772,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             active_subset = (map_start - win_start, map_end - win_start)
             context_seq = rec_seq[win_start:win_end]
+            seq_200 = rec_seq[map_start:map_end]
 
             pat_out_dir = output_dir / pat_name
             pat_out_dir.mkdir(parents=True, exist_ok=True)
             safe_rec = "".join(c if c.isalnum() else "_" for c in rec_id)
-            out_png = pat_out_dir / f"{pat_display}_rank{rank}_{safe_rec}_{map_start}_{map_end}.png"
+            stem = f"{pat_display}_rank{rank}_{safe_rec}_{map_start}_{map_end}"
+            out_png_adapted = pat_out_dir / f"{stem}_adapted.png"
+            out_png_delta = pat_out_dir / f"{stem}_delta.png"
 
-            if args.resume and out_png.is_file():
-                logger.info("Skipping existing map for %s rank %d: %s", pat_display, rank, out_png)
+            if args.resume and out_png_adapted.is_file() and out_png_delta.is_file():
+                logger.info("Skipping existing adapted + delta maps for %s rank %d: %s", pat_display, rank, stem)
                 continue
 
             logger.info(
-                "Computing dependency map for %s (rank %d): record=%s, map=[%d, %d), context=[%d, %d) (len=%d)...",
+                "Computing Adapted & Base dependency maps for %s (rank %d): record=%s, map=[%d, %d), context=[%d, %d) (len=%d)...",
                 pat_display,
                 rank,
                 rec_id,
@@ -771,33 +804,92 @@ def main(argv: Optional[List[str]] = None) -> int:
                 autoregressive=False,
             )
 
-            dm = DependencyMap.compute_batched(
+            # 1. Adapted RiNALMo pass
+            move_rinalmo_adapter(adapted_model, target_device)
+            dm_adapted = DependencyMap.compute_batched(
                 context_seq,
                 tokenize_func,
-                forward_func,
+                forward_adapted,
                 batch_size=args.batch_size,
                 enable_progress_bar=False,
                 options=job_options,
             )
+            move_rinalmo_adapter(adapted_model, cpu_device)
+            if target_device.type == "cuda":
+                torch.cuda.empty_cache()
 
+            # 2. Base RiNALMo pass
+            move_rinalmo_adapter(base_model, target_device)
+            dm_base = DependencyMap.compute_batched(
+                context_seq,
+                tokenize_func,
+                forward_base,
+                batch_size=args.batch_size,
+                enable_progress_bar=False,
+                options=job_options,
+            )
+            move_rinalmo_adapter(base_model, cpu_device)
+            if target_device.type == "cuda":
+                torch.cuda.empty_cache()
+
+            # Extract zero-diagonal 200x200 matrices
+            dep_adapted = dm_adapted.get_depenency_map_without_diagonal()
+            dep_base = dm_base.get_depenency_map_without_diagonal()
+            dep_delta = dep_adapted - dep_base
+
+            # Compute IC logo matrices
+            logo_adapted, ic_adapted = compute_reconstruction_ic_matrix(dm_adapted.reconstruction, seq_200)
+            _, ic_base = compute_reconstruction_ic_matrix(dm_base.reconstruction, seq_200)
+            delta_ic_bits = np.clip(ic_adapted - ic_base, 0.0, 2.0)
+            if dm_adapted.reconstruction is not None:
+                p_adapt = np.clip(dm_adapted.reconstruction, 1e-7, 1.0)
+                p_adapt = p_adapt / np.sum(p_adapt, axis=1, keepdims=True)
+                logo_delta = p_adapt * delta_ic_bits[:, np.newaxis]
+            else:
+                logo_delta = logo_adapted
+
+            # Render Adapted Map
             render_and_save_dependency_map_plot(
-                dm=dm,
+                dep_map=dep_adapted,
+                logo_matrix=logo_adapted,
                 seqlet_info=seqlet,
                 record_sequence=rec_seq,
                 map_start=map_start,
                 map_end=map_end,
                 regions_df=regions_df,
-                output_png=out_png,
+                output_png=out_png_adapted,
+                map_type_title="RiNALMo Adapted Nucleotide Dependency Map",
+                cbar_label="Adapted Nucleotide Dependency",
+                logo_ylabel="Bits",
+                scale=args.scale,
+            )
+
+            # Render Delta (Adapted - Base) Map
+            render_and_save_dependency_map_plot(
+                dep_map=dep_delta,
+                logo_matrix=logo_delta,
+                seqlet_info=seqlet,
+                record_sequence=rec_seq,
+                map_start=map_start,
+                map_end=map_end,
+                regions_df=regions_df,
+                output_png=out_png_delta,
+                map_type_title="RiNALMo Delta (Adapted − Base) Dependency Map",
+                cbar_label="Delta Dependency (Adapted − Base)",
+                logo_ylabel="Δ Bits",
                 scale=args.scale,
             )
 
             if args.save_npz:
-                out_npz = pat_out_dir / f"{pat_display}_rank{rank}_{safe_rec}_{map_start}_{map_end}.npz"
+                out_npz = pat_out_dir / f"{stem}.npz"
                 np.savez_compressed(
                     out_npz,
-                    dependency_map=dm.dependency_map,
-                    reconstruction=dm.reconstruction,
-                    sequence=np.array(list(context_seq[active_subset[0] : active_subset[1]])),
+                    dependency_map_adapted=dm_adapted.dependency_map,
+                    dependency_map_base=dm_base.dependency_map,
+                    dependency_map_delta=dep_delta,
+                    reconstruction_adapted=dm_adapted.reconstruction,
+                    reconstruction_base=dm_base.reconstruction,
+                    sequence=np.array(list(seq_200)),
                     map_start=map_start,
                     map_end=map_end,
                     seqlet_start=seqlet["seqlet_genomic_start"],
