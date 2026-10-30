@@ -440,10 +440,6 @@ python scripts/classify_motif_matches.py \
 python scripts/diagnose_motif_plateaus.py \
 --modisco-h5 outputs/tfmodisco_runs/full_tuned_0/motif_only_results.h5 \
 --output-dir outputs/tfmodisco_runs/full_tuned_0/plateau_diagnostics
-
-python scripts/run_fimo_full_dataset.py \
---modisco-h5 outputs/tfmodisco_runs/full_tuned_0/motif_only_results.h5 \
---output-dir outputs/tfmodisco_runs/full_tuned_0/fimo_diagnostics
 ```
 
 ## Common problems

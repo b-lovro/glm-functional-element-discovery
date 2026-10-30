@@ -414,96 +414,7 @@ def build_seqlet_compartment_summary(
     return summary_df, fe_mat
 
 
-def plot_seqlet_fold_enrichment_heatmap(
-    summary_df: pd.DataFrame,
-    fe_mat: pd.DataFrame,
-    comp_display_names: List[str],
-    output_png: Path,
-) -> None:
-    """Regional Fold-Enrichment Heatmap with integrated Seqlet Counts per Pattern."""
-    pattern_order = fe_mat.index.tolist()
-    num_patterns = len(pattern_order)
-    display_names = [format_pattern_display_name(p) for p in pattern_order]
-    summary_sorted = summary_df.set_index("pattern_name").loc[pattern_order].reset_index()
 
-    fig_height = max(9.0, 0.36 * num_patterns + 2.2)
-    cbar_shrink = min(0.8, 10.0 / fig_height)
-
-    fig = plt.figure(figsize=(15, fig_height), dpi=300)
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1.3, 4.7], wspace=0.08)
-
-    ax_cnt = fig.add_subplot(gs[0])
-    ax_hm = fig.add_subplot(gs[1])
-
-    y_pos = np.arange(num_patterns)
-    seq_cnt = summary_sorted["total_seqlets"].values
-    rec_cnt = summary_sorted["num_records"].values
-
-    ax_cnt.barh(y_pos, seq_cnt, color="#2c7bb6", alpha=0.88, height=0.75, edgecolor="#222222", linewidth=0.6)
-    max_cnt = max(seq_cnt) if len(seq_cnt) > 0 else 50
-    ax_cnt.set_xlim(0, max_cnt * 1.38)
-    ax_cnt.set_ylim(-0.5, num_patterns - 0.5)
-    ax_cnt.invert_yaxis()
-    ax_cnt.set_yticks(y_pos)
-    ax_cnt.set_yticklabels(display_names, fontsize=9.5, fontweight="bold")
-    ax_cnt.set_xlabel("Seqlet Count\n[Contributing Records]", fontsize=9.5, fontweight="bold")
-    ax_cnt.tick_params(axis="x", top=True, labeltop=True, bottom=True, labelbottom=True, labelsize=8.5)
-    ax_cnt.grid(axis="x", linestyle="--", alpha=0.5)
-
-    for i, (sc, rc) in enumerate(zip(seq_cnt, rec_cnt)):
-        ax_cnt.text(
-            sc + (max_cnt * 0.02),
-            i,
-            f"{sc} [{rc} sp]",
-            va="center",
-            ha="left",
-            fontsize=8,
-            fontweight="bold",
-            color="#222222",
-        )
-
-    # Right: Log2 Fold-Enrichment Heatmap
-    sns.heatmap(
-        fe_mat,
-        ax=ax_hm,
-        cmap="vlag",
-        center=0.0,
-        vmin=-4.0,
-        vmax=4.0,
-        annot=True,
-        fmt=".1f",
-        annot_kws={"fontsize": 8.5, "weight": "bold"},
-        cbar_kws={
-            "label": "$\\log_2(\\mathrm{Observed} / \\mathrm{Expected})$ Fold-Enrichment",
-            "shrink": cbar_shrink,
-            "aspect": 25,
-        },
-        linewidths=0.6,
-        linecolor="#dddddd",
-        yticklabels=False,
-    )
-    ax_hm.set_xticklabels(comp_display_names, rotation=30, ha="right", fontsize=9.5, fontweight="bold")
-    ax_hm.set_ylabel("")
-
-    if num_patterns > 25:
-        secax = ax_hm.secondary_xaxis("top")
-        secax.set_xticks(np.arange(len(comp_display_names)) + 0.5)
-        secax.set_xticklabels(comp_display_names, rotation=30, ha="left", fontsize=9.5, fontweight="bold")
-
-    top_edge = ax_hm.get_position().y1
-    title_y = top_edge + (1.45 / fig_height) if num_patterns > 25 else 0.98
-    fig.suptitle(
-        "TF-MoDISco Seqlet Regional Fold-Enrichment & Compartment Distribution\n"
-        "[Left: Seqlet Counts & Contributing Records | Right: Fold-Enrichment relative to Candidate Attribution Windows (Search Space)]",
-        fontsize=12,
-        fontweight="bold",
-        y=title_y,
-    )
-
-    output_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_png, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Seqlet regional fold-enrichment heatmap saved to: {output_png}")
 
 
 def plot_seqlet_counts_percentages_table(
@@ -1208,15 +1119,6 @@ def map_motifs(
     print(f"Seqlet compartment summary written to: {comp_summary_tsv}")
 
     if plot_heatmap:
-        heatmap_png = output_dir / "seqlet_regional_fold_enrichment_heatmap.png"
-        print(f"Generating Seqlet Regional Fold-Enrichment Heatmap to: {heatmap_png}...")
-        plot_seqlet_fold_enrichment_heatmap(
-            summary_df=comp_summary_df,
-            fe_mat=fe_mat,
-            comp_display_names=COMP_DISPLAY_NAMES,
-            output_png=heatmap_png,
-        )
-
         counts_png = output_dir / "seqlet_regional_counts_percentages_table.png"
         print(f"Generating Seqlet Regional Counts & Percentages Table to: {counts_png}...")
         plot_seqlet_counts_percentages_table(
