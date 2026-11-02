@@ -263,6 +263,39 @@ def compute_reconstruction_ic_matrix(recon: Optional[np.ndarray], seq_str: str) 
     return logo_matrix, np.ones(map_size, dtype=float)
 
 
+def compute_per_position_block_score(
+    dep_map: np.ndarray,
+    block_size: int = 6,
+    quantile: float = 0.25,
+) -> np.ndarray:
+    """Computes per-position block scores across map_size by averaging overlapping spans.
+
+    Args:
+        dep_map: 2D dependency map matrix of shape (L, L).
+        block_size: Consecutive diagonal block width in nt (default: 6).
+        quantile: Quantile of off-diagonal elements in each block (default: 0.25).
+
+    Returns:
+        1D array of shape (L,) containing per-nucleotide block scores.
+    """
+    map_size = dep_map.shape[0]
+    off_diag_mask = ~np.eye(block_size, dtype=bool)
+    n_spans = map_size - block_size + 1
+    span_scores = np.zeros(n_spans, dtype=float)
+
+    for i in range(n_spans):
+        block = dep_map[i : i + block_size, i : i + block_size]
+        span_scores[i] = float(np.quantile(block[off_diag_mask], quantile))
+
+    per_pos = np.zeros(map_size, dtype=float)
+    counts = np.zeros(map_size, dtype=float)
+    for i in range(n_spans):
+        per_pos[i : i + block_size] += span_scores[i]
+        counts[i : i + block_size] += 1.0
+
+    return per_pos / counts
+
+
 def move_rinalmo_adapter(seq_model: Any, target_device: torch.device) -> None:
     """Moves RiNALMoSequenceModel weights and index tensors to target_device."""
     seq_model.device = target_device
@@ -274,7 +307,7 @@ def move_rinalmo_adapter(seq_model: Any, target_device: torch.device) -> None:
 
 def render_and_save_dependency_map_plot(
     dep_map: np.ndarray,
-    logo_matrix: np.ndarray,
+    block_scores: np.ndarray,
     seqlet_info: Dict[str, Any],
     record_sequence: str,
     map_start: int,
@@ -283,25 +316,24 @@ def render_and_save_dependency_map_plot(
     output_png: Path,
     map_type_title: str = "RiNALMo Adapted Nucleotide Dependency Map",
     cbar_label: str = "Adapted Nucleotide Dependency",
-    logo_ylabel: str = "Bits",
+    block_ylabel: str = "Block Score",
     scale: int = 3,
 ) -> None:
-    """Renders 200x200 dependency map in the plot_annotated_dependency_map style and saves as PNG.
+    """Renders dependency map in the plot_annotated_dependency_map style and saves as PNG.
 
     Includes:
-      - Top reconstruction sequence logo (scaled by information content in bits)
+      - Top 1D line plot of per-position Block Score
       - Axis nucleotide characters
       - Bottom genomic overview slider / track
       - Overlapping landmark annotations on the diagonal
       - Highlighted bounding box around the centered 50-bp seqlet
     """
-    import logomaker
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
     from matplotlib.patches import Rectangle, Patch
 
     map_size = map_end - map_start
-    seq_200 = record_sequence[map_start:map_end]
+    seq_window = record_sequence[map_start:map_end]
     fasta_length = len(record_sequence)
     record_id = seqlet_info["record_id"]
     pattern_name = seqlet_info["pattern_name"]
@@ -310,46 +342,52 @@ def render_and_save_dependency_map_plot(
 
     # 1. Clip dependency map to [0.0, 5.0]
     dep_map_clipped = np.clip(dep_map, 0.0, 5.0)
-    logo_df = pd.DataFrame(logo_matrix, columns=["A", "C", "G", "T"])
 
-    # 3. Create matplotlib figure with 3 vertically stacked axes
+    # 2. Create matplotlib figure with 3 vertically stacked axes
     fig = plt.figure(figsize=(13.0, 14.0), dpi=300, facecolor="white")
     gs = gridspec.GridSpec(
         3,
         1,
-        height_ratios=[1.1, 10.0, 0.6],
+        height_ratios=[1.2, 10.0, 0.6],
         hspace=0.08,
         left=0.07,
         right=0.80,
-        top=0.88,
+        top=0.91,
         bottom=0.05,
     )
 
-    ax_logo = fig.add_subplot(gs[0])
+    ax_block = fig.add_subplot(gs[0])
     ax_map = fig.add_subplot(gs[1])
     ax_track = fig.add_subplot(gs[2])
 
     # -------------------------------------------------------------------------
-    # Panel 1: Top Reconstruction Sequence Logo
+    # Panel 1: Top 1D Line Plot of Per-Position Block Score
     # -------------------------------------------------------------------------
-    color_scheme = {
-        "A": "#109648",  # Green
-        "C": "#255C99",  # Blue
-        "G": "#F7B32B",  # Orange/Gold
-        "T": "#D62839",  # Red
-    }
-    logomaker.Logo(logo_df, ax=ax_logo, color_scheme=color_scheme, vpad=0.02)
-    ax_logo.set_xlim(-0.5, map_size - 0.5)
-    ax_logo.set_ylim(0.0, 2.05)
-    ax_logo.set_ylabel(logo_ylabel, fontsize=9, fontweight="bold")
-    ax_logo.set_xticks([])
-    ax_logo.tick_params(axis="y", labelsize=8)
-    ax_logo.spines["top"].set_visible(False)
-    ax_logo.spines["right"].set_visible(False)
-    ax_logo.spines["bottom"].set_visible(False)
+    x_positions = np.arange(map_size)
+    ax_block.plot(x_positions, block_scores, color="#1E3A8A", linewidth=2.0)
+    ax_block.fill_between(x_positions, block_scores, color="#3B82F6", alpha=0.25)
+
+    s_rel_start = max(0, seqlet_info["seqlet_genomic_start"] - map_start)
+    s_rel_end = min(map_size, seqlet_info["seqlet_genomic_end"] - map_start)
+    ax_block.axvspan(
+        s_rel_start - 0.5,
+        s_rel_end - 0.5,
+        color="#b2182b",
+        alpha=0.12,
+        linestyle="--",
+        linewidth=1.0,
+    )
+
+    ax_block.set_xlim(-0.5, map_size - 0.5)
+    ax_block.set_ylabel(block_ylabel, fontsize=9.5, fontweight="bold")
+    ax_block.set_xticks([])
+    ax_block.tick_params(axis="y", labelsize=8)
+    ax_block.spines["top"].set_visible(False)
+    ax_block.spines["right"].set_visible(False)
+    ax_block.grid(True, linestyle=":", alpha=0.6)
 
     # -------------------------------------------------------------------------
-    # Panel 2: 200x200 Dependency Map Heatmap
+    # Panel 2: Dependency Map Heatmap
     # -------------------------------------------------------------------------
     im = ax_map.imshow(
         dep_map_clipped,
@@ -362,12 +400,13 @@ def render_and_save_dependency_map_plot(
     )
 
     # Configure top and bottom x-axes with nucleotide characters
+    font_sz = 5.0 if map_size <= 100 else 3.5
     ax_map.tick_params(axis="x", top=True, labeltop=True, bottom=False, labelbottom=False)
     ax_map.set_xticks(np.arange(map_size))
-    ax_map.set_xticklabels(list(seq_200), fontsize=3.5, fontfamily="monospace")
+    ax_map.set_xticklabels(list(seq_window), fontsize=font_sz, fontfamily="monospace")
 
     ax_map.set_yticks(np.arange(map_size))
-    ax_map.set_yticklabels(list(seq_200), fontsize=3.5, fontfamily="monospace")
+    ax_map.set_yticklabels(list(seq_window), fontsize=font_sz, fontfamily="monospace")
 
     # Overlapping landmark annotations on the diagonal
     rec_regions = regions_df[
@@ -408,8 +447,6 @@ def render_and_save_dependency_map_plot(
                 )
 
     # Highlight Centered 50-bp Seqlet Bounding Box
-    s_rel_start = max(0, seqlet_info["seqlet_genomic_start"] - map_start)
-    s_rel_end = min(map_size, seqlet_info["seqlet_genomic_end"] - map_start)
     s_len = s_rel_end - s_rel_start
 
     seqlet_rect = Rectangle(
@@ -445,7 +482,7 @@ def render_and_save_dependency_map_plot(
     fig.legend(
         handles=legend_patches,
         loc="upper left",
-        bbox_to_anchor=(0.815, 0.88),
+        bbox_to_anchor=(0.815, 0.91),
         fontsize=8.0,
         frameon=True,
         facecolor="white",
@@ -468,24 +505,22 @@ def render_and_save_dependency_map_plot(
     ax_track.spines["left"].set_visible(False)
     ax_track.spines["right"].set_visible(False)
 
-    # Title & Subtitle (4 clean lines, well spaced without clipping)
+    # Title & Subtitle (2 clean lines without pattern_n or Record: id)
     clade_str = f" ({seqlet_info['order_clade']})" if ("order_clade" in seqlet_info and seqlet_info["order_clade"]) else ""
     fig.suptitle(
-        f"{pattern_display} (Exemplar #{rank}) — 200×200 {map_type_title}\n"
         f"Species: {seqlet_info['species']}{clade_str} | Region: [{map_start:,}, {map_end:,}) bp\n"
         f"50-bp Consensus Match: {seqlet_info['exact_matches_50']}/50 bp ({seqlet_info['match_fraction_50']*100:.1f}%) | "
-        f"Mean Attr: {seqlet_info['attr_mean_50']:.1f} | PWM Score: {seqlet_info['pwm_score_50']:.1f}\n"
-        f"Record: {record_id}",
-        fontsize=10.5,
+        f"Mean Attr: {seqlet_info['attr_mean_50']:.1f} | PWM Score: {seqlet_info['pwm_score_50']:.1f}",
+        fontsize=11.0,
         fontweight="bold",
         y=0.965,
-        linespacing=1.3,
+        linespacing=1.35,
     )
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Saved 200x200 dependency map to: %s", output_png)
+    logger.info("Saved dependency map to: %s", output_png)
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -588,6 +623,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         type=int,
         default=3,
         help="Resolution scale factor for PNG export (default: 3).",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=6,
+        help="Block size in bp for diagonal block score computation (default: 6).",
+    )
+    parser.add_argument(
+        "--quantile",
+        type=float,
+        default=0.25,
+        help="Quantile for off-diagonal values in block score (default: 0.25).",
     )
     parser.add_argument(
         "--save-npz",
@@ -832,26 +879,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             if target_device.type == "cuda":
                 torch.cuda.empty_cache()
 
-            # Extract zero-diagonal 200x200 matrices
+            # Extract zero-diagonal matrices
             dep_adapted = dm_adapted.get_depenency_map_without_diagonal()
             dep_base = dm_base.get_depenency_map_without_diagonal()
             dep_delta = dep_adapted - dep_base
 
-            # Compute IC logo matrices
-            logo_adapted, ic_adapted = compute_reconstruction_ic_matrix(dm_adapted.reconstruction, seq_200)
-            _, ic_base = compute_reconstruction_ic_matrix(dm_base.reconstruction, seq_200)
-            delta_ic_bits = np.clip(ic_adapted - ic_base, 0.0, 2.0)
-            if dm_adapted.reconstruction is not None:
-                p_adapt = np.clip(dm_adapted.reconstruction, 1e-7, 1.0)
-                p_adapt = p_adapt / np.sum(p_adapt, axis=1, keepdims=True)
-                logo_delta = p_adapt * delta_ic_bits[:, np.newaxis]
-            else:
-                logo_delta = logo_adapted
+            # Compute per-position Block Scores
+            bs_adapted = compute_per_position_block_score(
+                dep_adapted, block_size=args.block_size, quantile=args.quantile
+            )
+            bs_base = compute_per_position_block_score(
+                dep_base, block_size=args.block_size, quantile=args.quantile
+            )
+            bs_delta = np.maximum(0.0, bs_adapted - bs_base)
 
             # Render Adapted Map
             render_and_save_dependency_map_plot(
                 dep_map=dep_adapted,
-                logo_matrix=logo_adapted,
+                block_scores=bs_adapted,
                 seqlet_info=seqlet,
                 record_sequence=rec_seq,
                 map_start=map_start,
@@ -860,14 +905,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                 output_png=out_png_adapted,
                 map_type_title="RiNALMo Adapted Nucleotide Dependency Map",
                 cbar_label="Adapted Nucleotide Dependency",
-                logo_ylabel="Bits",
+                block_ylabel="Block Score",
                 scale=args.scale,
             )
 
             # Render Delta (Adapted - Base) Map
             render_and_save_dependency_map_plot(
                 dep_map=dep_delta,
-                logo_matrix=logo_delta,
+                block_scores=bs_delta,
                 seqlet_info=seqlet,
                 record_sequence=rec_seq,
                 map_start=map_start,
@@ -876,7 +921,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 output_png=out_png_delta,
                 map_type_title="RiNALMo Delta (Adapted − Base) Dependency Map",
                 cbar_label="Delta Dependency (Adapted − Base)",
-                logo_ylabel="Δ Bits",
+                block_ylabel="Δ Block Score",
                 scale=args.scale,
             )
 
@@ -889,6 +934,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                     dependency_map_delta=dep_delta,
                     reconstruction_adapted=dm_adapted.reconstruction,
                     reconstruction_base=dm_base.reconstruction,
+                    block_score_adapted=bs_adapted,
+                    block_score_base=bs_base,
+                    block_score_delta=bs_delta,
                     sequence=np.array(list(seq_200)),
                     map_start=map_start,
                     map_end=map_end,

@@ -423,7 +423,7 @@ def plot_seqlet_counts_percentages_table(
     comp_display_names: List[str],
     output_png: Path,
 ) -> None:
-    """Regional Counts & Percentages Heatmap Table with integrated Total Seqlets per Pattern."""
+    """Regional Counts & Percentages Heatmap Table."""
     pattern_order = summary_df["pattern_name"].tolist()
     num_patterns = len(pattern_order)
     display_names = [format_pattern_display_name(p) for p in pattern_order]
@@ -443,40 +443,9 @@ def plot_seqlet_counts_percentages_table(
     fig_height = max(9.0, 0.36 * num_patterns + 2.2)
     cbar_shrink = min(0.8, 10.0 / fig_height)
 
-    fig = plt.figure(figsize=(15, fig_height), dpi=300)
-    gs = gridspec.GridSpec(1, 2, width_ratios=[1.3, 4.7], wspace=0.08)
+    fig, ax_hm = plt.subplots(figsize=(12.0, fig_height), dpi=300, facecolor="white")
 
-    ax_cnt = fig.add_subplot(gs[0])
-    ax_hm = fig.add_subplot(gs[1])
-
-    y_pos = np.arange(num_patterns)
-    seq_cnt = summary_sorted["total_seqlets"].values
-    rec_cnt = summary_sorted["num_records"].values
-
-    ax_cnt.barh(y_pos, seq_cnt, color="#2c7bb6", alpha=0.88, height=0.75, edgecolor="#222222", linewidth=0.6)
-    max_cnt = max(seq_cnt) if len(seq_cnt) > 0 else 50
-    ax_cnt.set_xlim(0, max_cnt * 1.38)
-    ax_cnt.set_ylim(-0.5, num_patterns - 0.5)
-    ax_cnt.invert_yaxis()
-    ax_cnt.set_yticks(y_pos)
-    ax_cnt.set_yticklabels(display_names, fontsize=9.5, fontweight="bold")
-    ax_cnt.set_xlabel("Seqlet Count\n[Contributing Records]", fontsize=9.5, fontweight="bold")
-    ax_cnt.tick_params(axis="x", top=True, labeltop=True, bottom=True, labelbottom=True, labelsize=8.5)
-    ax_cnt.grid(axis="x", linestyle="--", alpha=0.5)
-
-    for i, (sc, rc) in enumerate(zip(seq_cnt, rec_cnt)):
-        ax_cnt.text(
-            sc + (max_cnt * 0.02),
-            i,
-            f"{sc} [{rc} sp]",
-            va="center",
-            ha="left",
-            fontsize=8,
-            fontweight="bold",
-            color="#222222",
-        )
-
-    # Right: Percentage Heatmap with annotated Count & Percentage
+    # Percentage Heatmap with annotated Count & Percentage
     sns.heatmap(
         pct_mat,
         ax=ax_hm,
@@ -493,9 +462,12 @@ def plot_seqlet_counts_percentages_table(
         },
         linewidths=0.6,
         linecolor="#dddddd",
-        yticklabels=False,
+        yticklabels=display_names,
     )
     ax_hm.set_xticklabels(comp_display_names, rotation=30, ha="right", fontsize=9.5, fontweight="bold")
+    ax_hm.tick_params(axis="y", labelsize=9.5, rotation=0)
+    for label in ax_hm.get_yticklabels():
+        label.set_fontweight("bold")
     ax_hm.set_ylabel("")
 
     if num_patterns > 25:
@@ -507,7 +479,7 @@ def plot_seqlet_counts_percentages_table(
     title_y = top_edge + (1.45 / fig_height) if num_patterns > 25 else 0.98
     fig.suptitle(
         "TF-MoDISco Seqlet Compartment Breakdown: Counts & Percentages\n"
-        "[Left: Total Pattern Seqlets & Records | Right: Seqlet Count & Percentage (%) per Biological Compartment]",
+        "[Seqlet Count & Percentage (%) per Biological Compartment]",
         fontsize=12,
         fontweight="bold",
         y=title_y,
@@ -713,7 +685,7 @@ def build_and_plot_phylogenetic_order_conservation(
 
         for j, ord_name in enumerate(phylo_orders):
             ord_tot = len(order_to_all_species[ord_name])
-            ord_hit = int(sub_cons[sub_cons["tax_order"] == ord_name]["record_id"].nunique())
+            ord_hit = int(sub_all[sub_all["tax_order"] == ord_name]["record_id"].nunique())
             ord_pct = (ord_hit / ord_tot * 100.0) if ord_tot > 0 else 0.0
             pct_mat[i, j] = ord_pct
             annot_mat[i, j] = f"{ord_hit}/{ord_tot}" if ord_hit > 0 else "-"
@@ -728,12 +700,12 @@ def build_and_plot_phylogenetic_order_conservation(
     phylo_df.to_csv(phylo_tsv, sep="\t", index=False)
     print(f"17-Mammalian-Order phylogenetic conservation summary written to: {phylo_tsv}")
 
-    # Plot single-panel 17-Mammalian-Order Heatmap with pattern names & (species, orders) on the left
-    cons_sp = phylo_df["conserved_comp_species_count"].values
-    cons_ord = phylo_df["conserved_comp_orders_count"].values
+    # Plot single-panel 17-Mammalian-Order Heatmap with pattern names & (species, orders) in any compartment on the left
+    any_sp = phylo_df["any_comp_species_count"].values
+    any_ord = phylo_df["any_comp_orders_count"].values
     y_labels = [
-        f"{format_pattern_display_name(pat)} ({c_s} sp, {c_o} ord)"
-        for pat, c_s, c_o in zip(pattern_order, cons_sp, cons_ord)
+        f"{format_pattern_display_name(pat)} ({a_s} sp, {a_o} ord)"
+        for pat, a_s, a_o in zip(pattern_order, any_sp, any_ord)
     ]
 
     fig_height = max(9.5, 0.42 * num_patterns + 2.5)
@@ -752,7 +724,7 @@ def build_and_plot_phylogenetic_order_conservation(
         fmt="",
         annot_kws={"fontsize": 7.8, "weight": "bold"},
         cbar_kws={
-            "label": "Species in Taxonomic Order Carrying Motif at Conserved Compartment (%)",
+            "label": "Species in Taxonomic Order Carrying Motif in Any Compartment (%)",
             "shrink": cbar_shrink,
             "aspect": 25,
         },
@@ -784,7 +756,7 @@ def build_and_plot_phylogenetic_order_conservation(
     title_y = top_edge + (1.50 / fig_height) if num_patterns > 25 else 0.985
     fig.suptitle(
         "17-Mammalian-Order Phylogenetic Conservation Heatmap (TF-MoDISco High-Attribution Seqlets)\n"
-        "[Fraction (k/N) of Species per Mammalian Order Carrying Motif at Conserved Compartment]",
+        "[Fraction (k/N) of Species per Mammalian Order Carrying Motif in Any Compartment]",
         fontsize=12.5,
         fontweight="bold",
         y=title_y,

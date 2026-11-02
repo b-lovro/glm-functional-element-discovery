@@ -525,7 +525,6 @@ def generate_pattern_plots(
             jitter_strength=jitter_strength,
             rng=rng,
         )
-        ax_tss.set_title("Distance Distribution from TSS", fontsize=11.5, fontweight="bold")
 
         plot_single_landmark_panel(
             ax=ax_28s,
@@ -544,11 +543,6 @@ def generate_pattern_plots(
             point_color_rev="#7fc97f",
             jitter_strength=jitter_strength,
             rng=rng,
-        )
-        ax_28s.set_title(
-            f"Distance Distribution from {second_landmark_name}",
-            fontsize=11.5,
-            fontweight="bold",
         )
 
         plt.tight_layout()
