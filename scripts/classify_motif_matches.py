@@ -14,14 +14,14 @@ and partitions all discovered patterns into 3 mutually exclusive lists:
    such as pattern_0 in distal IGS).
 
 Usage:
-  # Standard execution using defaults on full_tuned run:
-  python scripts/classify_motif_matches.py \
-    --input-dir outputs/tfmodisco_runs/full_tuned
+  # Standard execution using defaults on all_seq_n_24 run:
+  python scripts/classify_motif_matches.py \\
+    --input-dir outputs/tfmodisco_runs/all_seq_n_24
 
   # Filter ubiquitous CTCF hits and require strict p <= 1e-5:
-  python scripts/classify_motif_matches.py \
-    --input-dir outputs/tfmodisco_runs/full_tuned \
-    --filter-ctcf \
+  python scripts/classify_motif_matches.py \\
+    --input-dir outputs/tfmodisco_runs/all_seq_n_24 \\
+    --filter-ctcf \\
     --p-threshold 1e-5
 """
 
@@ -34,7 +34,6 @@ os.environ["MPLCONFIGDIR"] = "/tmp/mpl_cache"
 import argparse
 import logging
 import math
-import random
 import re
 import sys
 from pathlib import Path
@@ -50,6 +49,17 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.tfmodisco_common import (
+    DEFAULT_RUN_DIR,
+    format_pattern_display_name,
+    pattern_sort_key,
+    set_global_seed,
+)
+
 
 # Configure module logger
 logger = logging.getLogger("classify_motif_matches")
@@ -58,12 +68,6 @@ logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-
-
-def set_global_seed(seed: int) -> None:
-    """Sets random seeds for reproducibility across random and numpy."""
-    random.seed(seed)
-    np.random.seed(seed)
 
 
 def parse_motifs_html_table(report_dir: Path, dataset_name: str) -> pd.DataFrame:
@@ -206,6 +210,20 @@ def extract_candidate_matches(
     return hits
 
 
+def _parse_optional_number(val: Any, as_int: bool = False) -> float:
+    """Parse numeric field from TOMTOM HTML, returning NaN for empty/'NA' and failing loudly otherwise."""
+    if pd.isna(val):
+        return np.nan
+    raw = str(val).strip()
+    if not raw or raw.upper() in ("NA", "NAN", "NONE"):
+        return np.nan
+    try:
+        return int(raw) if as_int else float(raw)
+    except ValueError:
+        logger.error("Failed to parse numeric field from %r", val, exc_info=True)
+        raise
+
+
 def classify_all_patterns(
     reports_data: Dict[str, pd.DataFrame],
     dna_datasets: List[str],
@@ -297,17 +315,11 @@ def classify_all_patterns(
                 pv0 = p_row["pval0"] if "pval0" in p_row.index else (
                     p_row["qval0"] if "qval0" in p_row.index else "NA"
                 )
-                try:
-                    pv0_float = float(pv0)
-                except ValueError:
-                    pv0_float = np.nan
+                pv0_float = _parse_optional_number(pv0, as_int=False)
                 record[f"{dname}_match0"] = m0
                 record[f"{dname}_pval0"] = pv0_float
                 if "num_seqlets" in p_row.index and "num_seqlets" not in record:
-                    try:
-                        record["num_seqlets"] = int(p_row["num_seqlets"])
-                    except ValueError:
-                        record["num_seqlets"] = np.nan
+                    record["num_seqlets"] = _parse_optional_number(p_row["num_seqlets"], as_int=True)
             else:
                 record[f"{dname}_match0"] = "NA"
                 record[f"{dname}_pval0"] = np.nan
@@ -547,13 +559,6 @@ def format_pval(p: float) -> str:
     return f"p={mantissa:.1f}e{exponent}"
 
 
-def format_pattern_display_name(name: str) -> str:
-    """Format pattern identifier cleanly, preserving neg_ prefix if from neg_patterns."""
-    if name.startswith("neg_patterns."):
-        return f"neg_{name.split('.')[-1]}"
-    return name.replace("pos_patterns.", "")
-
-
 def plot_pattern_classification_table(
     df: pd.DataFrame,
     output_png: Path,
@@ -561,9 +566,10 @@ def plot_pattern_classification_table(
 ) -> None:
     """Render a clean, uncolored publication table of pattern classifications and database hits."""
     df = df.copy()
-    df["is_neg"] = df["pattern"].apply(lambda p: 1 if str(p).startswith("neg_") else 0)
-    df["pat_num"] = df["pattern"].apply(lambda p: int(str(p).split("_")[-1]))
-    df = df.sort_values(["is_neg", "pat_num"]).reset_index(drop=True)
+    sort_keys = df["pattern"].astype(str).apply(pattern_sort_key)
+    df["_sort_neg"] = [k[0] for k in sort_keys]
+    df["_sort_num"] = [k[1] for k in sort_keys]
+    df = df.sort_values(["_sort_neg", "_sort_num"]).drop(columns=["_sort_neg", "_sort_num"]).reset_index(drop=True)
 
     num_patterns = len(df)
     columns = [
@@ -647,8 +653,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=Path("outputs/tfmodisco_runs/full_tuned"),
-        help="Input directory containing TF-MoDISco run report folders (default: outputs/tfmodisco_runs/full_tuned)",
+        default=DEFAULT_RUN_DIR,
+        help=f"Input directory containing TF-MoDISco run report folders (default: {DEFAULT_RUN_DIR})",
     )
     parser.add_argument(
         "--output-tsv",

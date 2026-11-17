@@ -12,7 +12,7 @@ this script computes:
      attribution a_max, with configurable gap tolerance `--max-gap` and minimum length `--min-core-len`).
 
 Outputs written to `--output-dir`:
-  - `<pattern_name>.png`: Full-length (50 bp) Information Content (0-2 bits) logo.
+  - `<pattern_name>.png`: Full-length Information Content (0-2 bits) logo.
   - `core_trimmed_ic_logos/<pattern_name>.ic_core.fwd.png` (and `.rev.png`): Standalone zoomed core IC logos.
   - `full_ic_logos/<pattern_name>.ic_full.fwd.png` (and `.rev.png`): Standalone full-length IC logos.
   - `core_subsequence_summary.tsv`: Tabular summary of full consensus, core coordinates, core consensus,
@@ -20,8 +20,8 @@ Outputs written to `--output-dir`:
 
 Usage:
   /mnt/Dati/miniconda/envs/group6-rinalmo/bin/python scripts/plot_motif_ic_and_core_logos.py \\
-    --results outputs/tfmodisco_runs/all_seq_n/results.h5 \\
-    --output-dir outputs/tfmodisco_runs/all_seq_n/ic_and_core_logos
+    --results outputs/tfmodisco_runs/all_seq_n_24/results.h5 \\
+    --output-dir outputs/tfmodisco_runs/all_seq_n_24/ic_and_core_logos
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ import os
 os.environ["MPLCONFIGDIR"] = "/tmp/mpl_cache"
 
 import argparse
-import random
 import sys
 import traceback
 from pathlib import Path
@@ -45,7 +44,18 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import torch
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.tfmodisco_common import (
+    DEFAULT_RUN_DIR,
+    compute_shannon_ic_bits,
+    get_dynamic_device,
+    pattern_sort_key,
+    set_global_seed,
+)
 
 
 BASES: List[str] = ["A", "C", "G", "T"]
@@ -69,37 +79,6 @@ IUPAC_PAIR_MAP: Dict[Tuple[str, str], str] = {
 }
 
 
-def set_seed(seed: int = 42, deterministic: bool = True) -> None:
-    """Set global random seeds across random, numpy, and torch for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-
-def get_device() -> torch.device:
-    """Dynamically allocate compute device (CUDA, MPS, or CPU)."""
-    return torch.device(
-        "cuda"
-        if torch.cuda.is_available()
-        else "mps"
-        if torch.backends.mps.is_available()
-        else "cpu"
-    )
-
-
-def pattern_sort_key(full_pattern_name: str) -> Tuple[int, int]:
-    """Sort pos_patterns before neg_patterns, then numerically by pattern index."""
-    parts = full_pattern_name.split(".")
-    group_order = 0 if parts[0] == "pos_patterns" else 1
-    idx_str = parts[-1].split("_")[-1]
-    return (group_order, int(idx_str))
-
-
 def compute_ic_matrix(ppm: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Compute Shannon Information Content (IC) per position and IC-scaled matrix from PPM.
 
@@ -114,11 +93,7 @@ def compute_ic_matrix(ppm: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     row_sums = ppm.sum(axis=1, keepdims=True)
     row_sums_safe = np.where(row_sums > 0.0, row_sums, 1.0)
     probs = ppm / row_sums_safe
-    probs_clipped = np.clip(probs, 1e-12, 1.0)
-
-    # Shannon entropy H_i = -sum_b p_{i,b} log2(p_{i,b}); IC_i = 2 - H_i
-    ic_per_pos = 2.0 + np.sum(probs * np.log2(probs_clipped), axis=1)
-    ic_per_pos = np.clip(ic_per_pos, 0.0, 2.0)
+    ic_per_pos = compute_shannon_ic_bits(probs, eps=1e-12)
     ic_matrix = probs * ic_per_pos[:, None]
     return ic_per_pos, ic_matrix
 
@@ -309,7 +284,7 @@ def render_logo_on_axis(
         ax.set_xticks(positions)
         ax.set_xticklabels(tick_labels, fontsize=8.0, family="monospace", fontweight="bold")
     elif consensus_str is not None:
-        # For full 50 bp logos, print the consensus base on every position and numbers every 5 bp
+        # For longer logos (> 30 bp), print the consensus base on every position and numbers every 5 bp
         tick_labels = []
         for idx_offset in range(L):
             pos_num = start_pos + idx_offset
@@ -545,15 +520,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--results",
         type=Path,
-        default=Path("outputs/tfmodisco_runs/all_seq_n/results.h5"),
-        help="Path to TF-MoDISco HDF5 results file (default: outputs/tfmodisco_runs/all_seq_n/results.h5)",
+        default=DEFAULT_RUN_DIR / "results.h5",
+        help=f"Path to TF-MoDISco HDF5 results file (default: {DEFAULT_RUN_DIR / 'results.h5'})",
     )
     parser.add_argument(
         "--output-dir",
         "-o",
         type=Path,
-        default=Path("outputs/tfmodisco_runs/all_seq_n/ic_and_core_logos"),
-        help="Directory to write IC and core-trimmed logo PNGs (default: outputs/tfmodisco_runs/all_seq_n/ic_and_core_logos)",
+        default=DEFAULT_RUN_DIR / "ic_and_core_logos",
+        help=f"Directory to write IC and core-trimmed logo PNGs (default: {DEFAULT_RUN_DIR / 'ic_and_core_logos'})",
     )
     parser.add_argument(
         "--core-threshold",
@@ -603,8 +578,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     """Main entry point."""
     try:
         args = parse_args(argv)
-        set_seed(seed=args.seed, deterministic=True)
-        device = get_device()
+        set_global_seed(seed=args.seed, deterministic=True)
+        device = get_dynamic_device()
         print(f"[info] Initialized plot_motif_ic_and_core_logos on device={device}")
         print(
             f"[info] Extracting Information Content and Core Subsequences "

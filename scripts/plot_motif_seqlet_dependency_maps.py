@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Generate 200x200 RiNALMo (+LoRA) Dependency Maps for Exemplar TF-MoDISco Seqlets
-================================================================================
+Generate RiNALMo (+LoRA) Dependency Maps for Exemplar TF-MoDISco Seqlets
+========================================================================
 Loads the RiNALMo-mega model merged with the adapted LoRA weights, ranks all
-50-bp seqlets for each discovered TF-MoDISco motif by:
-  1. Minimum 50-bp Hamming distance (maximum exact matches to 50-bp motif consensus)
-  2. High 50-bp mean attribution magnitude
-  3. High 50-bp PWM log-odds score
+seqlets for each discovered TF-MoDISco motif by:
+  1. Minimum Hamming distance (maximum exact matches to the motif consensus)
+  2. High mean attribution magnitude across the seqlet
+  3. High PWM log-odds score
 
-For the top-K distinct exemplar seqlets per pattern, computes a 200x200 nucleotide
-dependency map centered on the seqlet within a 1,022-bp context window using
-in-silico mutagenesis (with reconstruction). Renders each map in the style of
-scripts/plot_annotated_dependency_map.py, highlighting the centered 50-bp seqlet
-and overlapping landmark annotations, and saves the output as high-resolution PNG.
+For the top-K distinct exemplar seqlets per pattern, computes a dependency map
+centered on the seqlet within a 1,022-bp context window using in-silico
+mutagenesis (with reconstruction). Renders each map with top block-score bars,
+nucleotide axes, genomic slider track, landmark outlines, and a centered seqlet
+bounding box, and saves the output as a high-resolution PNG.
 """
 
 from __future__ import annotations
@@ -27,19 +27,24 @@ import argparse
 from functools import partial
 import logging
 from pathlib import Path
-import random
 import sys
 import traceback
 from typing import Any, Dict, List, Optional, Tuple
 
 import h5py
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.gridspec as gridspec
+from matplotlib.patches import Patch, Rectangle
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import torch
 
-# Ensure repository root and external/dependency_map are in sys.path
+# Ensure repository root, src/, and external/dependency_map are in sys.path
 repo_root = Path(__file__).resolve().parents[1]
+if str(repo_root) not in sys.path:
+    sys.path.insert(0, str(repo_root))
 if str(repo_root / "src") not in sys.path:
     sys.path.insert(0, str(repo_root / "src"))
 if str(repo_root / "external/dependency_map/src") not in sys.path:
@@ -47,6 +52,16 @@ if str(repo_root / "external/dependency_map/src") not in sys.path:
 
 from dependency_map import DependencyMap, DependencyMapOptions
 from glmfe.seq_models.rinalmo import load_rinalmo_model
+from scripts.tfmodisco_common import (
+    DEFAULT_INPUT_DIR,
+    DEFAULT_RECORDS_PARQUET,
+    DEFAULT_REGIONS_PARQUET,
+    DEFAULT_RUN_DIR,
+    format_pattern_display_name,
+    get_dynamic_device,
+    pattern_sort_key,
+    set_global_seed,
+)
 
 logger = logging.getLogger("plot_motif_seqlet_dependency_maps")
 logging.basicConfig(
@@ -54,32 +69,6 @@ logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-
-
-def set_global_seed(seed: int = 42, deterministic: bool = True) -> None:
-    """Sets random seeds across random, numpy, and torch for reproducibility."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-
-def pattern_sort_key(name: str) -> Tuple[int, int]:
-    """Extracts (is_neg, pattern_index) for natural sorting (pos_patterns first, then neg_patterns)."""
-    is_neg = 1 if name.startswith("neg_") else 0
-    parts = name.split(".")[-1].split("_")
-    return (is_neg, int(parts[-1]))
-
-
-def format_pattern_display_name(name: str) -> str:
-    """Formats pattern identifier cleanly, preserving neg_ prefix if from neg_patterns."""
-    if name.startswith("neg_patterns."):
-        return f"neg_{name.split('.')[-1]}"
-    return name.split(".")[-1]
 
 
 def get_base_color(ftype: str) -> Optional[str]:
@@ -104,7 +93,7 @@ def get_base_color(ftype: str) -> Optional[str]:
 
 def select_top_exemplar_seqlets(
     pattern_name: str,
-    ppm_50: np.ndarray,
+    ppm: np.ndarray,
     example_idxs: np.ndarray,
     seqlet_starts: np.ndarray,
     seqlet_ends: np.ndarray,
@@ -116,23 +105,23 @@ def select_top_exemplar_seqlets(
     top_k: int = 3,
     min_genomic_separation: int = 50,
 ) -> List[Dict[str, Any]]:
-    """Ranks all 50-bp seqlets of a motif and selects top-K distinct exemplar instances.
+    """Rank all seqlets of a motif and select top-K spatially distinct exemplar instances.
 
     Ranking criteria:
-      1. Minimum 50-bp Hamming distance (maximum exact sequence matches out of 50 to the motif consensus)
-      2. High 50-bp mean attribution magnitude
-      3. High 50-bp PWM log-odds score (tie-breaker)
+      1. Minimum Hamming distance (maximum exact sequence matches to the motif consensus)
+      2. High mean attribution magnitude across the seqlet
+      3. High PWM log-odds score (tie-breaker)
 
     Args:
         pattern_name: Full pattern name (e.g. 'pos_patterns.pattern_0').
-        ppm_50: Position Probability Matrix of shape (50, 4).
+        ppm: Position Probability Matrix of shape (L, 4).
         example_idxs: 1D array of candidate window indices, shape (N_seqlets,).
-        seqlet_starts: 1D array of seqlet start offsets in 400-bp window, shape (N_seqlets,).
-        seqlet_ends: 1D array of seqlet end offsets in 400-bp window, shape (N_seqlets,).
+        seqlet_starts: 1D array of seqlet start offsets in candidate window, shape (N_seqlets,).
+        seqlet_ends: 1D array of seqlet end offsets in candidate window, shape (N_seqlets,).
         is_revcomps: 1D boolean array of reverse-complement flags, shape (N_seqlets,).
         meta_df: Candidate metadata DataFrame matching example_idx.
-        one_hot_arr: 3D array of one-hot sequences, shape (N_windows, 4, 400).
-        att_arr: 3D array of attribution matrices, shape (N_windows, 4, 400).
+        one_hot_arr: 3D array of one-hot sequences, shape (N_windows, 4, W).
+        att_arr: 3D array of attribution matrices, shape (N_windows, 4, W).
         top_k: Number of exemplar seqlets to select (default: 3).
         min_genomic_separation: Minimum genomic separation in bp to prevent picking overlapping loci.
 
@@ -143,13 +132,14 @@ def select_top_exemplar_seqlets(
     if n_seqlets == 0:
         return []
 
-    consensus_idx = np.argmax(ppm_50, axis=1)  # shape: (50,)
+    pattern_len = int(ppm.shape[0])
+    consensus_idx = np.argmax(ppm, axis=1)  # shape: (L,)
     alphabet = ["A", "C", "G", "T"]
     consensus_str = "".join(alphabet[idx] for idx in consensus_idx)
 
     # Pre-clip PPM for log-odds calculation
-    ppm_safe = np.clip(ppm_50, 1e-4, 1.0)
-    log_odds_mat = np.log2(ppm_safe / 0.25)  # shape: (50, 4)
+    ppm_safe = np.clip(ppm, 1e-4, 1.0)
+    log_odds_mat = np.log2(ppm_safe / 0.25)  # shape: (L, 4)
 
     candidates: List[Dict[str, Any]] = []
 
@@ -170,7 +160,7 @@ def select_top_exemplar_seqlets(
         seqlet_genomic_start = window_start + s_start
         seqlet_genomic_end = window_start + s_end
 
-        # Extract 50-bp sequence slice (shape: 4, 50)
+        # Extract seqlet sequence slice (shape: 4, L)
         oh_slice = one_hot_arr[ex_idx, :, s_start:s_end]
         att_slice = att_arr[ex_idx, :, s_start:s_end]
 
@@ -179,16 +169,17 @@ def select_top_exemplar_seqlets(
             oh_slice = oh_slice[::-1, ::-1]
             att_slice = att_slice[::-1, ::-1]
 
-        seq_indices = np.argmax(oh_slice, axis=0)  # shape: (50,)
+        seq_indices = np.argmax(oh_slice, axis=0)  # shape: (L,)
+        seq_len = int(len(seq_indices))
         seq_str = "".join(alphabet[b] for b in seq_indices)
 
-        hamming_dist = int(np.sum(seq_indices != consensus_idx))
-        exact_matches = 50 - hamming_dist
-        match_fraction = exact_matches / 50.0
+        hamming_dist = int(np.sum(seq_indices != consensus_idx[:seq_len]))
+        exact_matches = seq_len - hamming_dist
+        match_fraction = exact_matches / float(seq_len)
 
-        pwm_score = float(np.sum(log_odds_mat[np.arange(50), seq_indices]))
+        pwm_score = float(np.sum(log_odds_mat[np.arange(seq_len), seq_indices]))
 
-        per_base_attr = np.sum(np.abs(att_slice), axis=0)  # shape: (50,)
+        per_base_attr = np.sum(np.abs(att_slice), axis=0)  # shape: (L,)
         attr_mean = float(np.mean(per_base_attr))
 
         candidates.append(
@@ -233,7 +224,7 @@ def select_top_exemplar_seqlets(
             if s["record_id"] == cand["record_id"]:
                 inter_start = max(s["seqlet_genomic_start"], cand["seqlet_genomic_start"])
                 inter_end = min(s["seqlet_genomic_end"], cand["seqlet_genomic_end"])
-                if (inter_end - inter_start) > (50 - min_genomic_separation):
+                if (inter_end - inter_start) > (pattern_len - min_genomic_separation):
                     overlap = True
                     break
         if not overlap:
@@ -245,30 +236,12 @@ def select_top_exemplar_seqlets(
     return selected
 
 
-def compute_reconstruction_ic_matrix(recon: Optional[np.ndarray], seq_str: str) -> Tuple[np.ndarray, np.ndarray]:
-    """Computes per-position reconstruction probabilities and IC in bits (L, 4) and (L,)."""
-    map_size = len(seq_str)
-    if recon is not None:
-        p_safe = np.clip(recon, 1e-7, 1.0)
-        p_safe = p_safe / np.sum(p_safe, axis=1, keepdims=True)
-        entropy = -np.sum(p_safe * np.log2(p_safe), axis=1)  # (L,)
-        ic_bits = np.clip(2.0 - entropy, 0.0, 2.0)  # (L,)
-        logo_matrix = p_safe * ic_bits[:, np.newaxis]  # (L, 4)
-        return logo_matrix, ic_bits
-    lut = {"A": 0, "C": 1, "G": 2, "T": 3}
-    logo_matrix = np.zeros((map_size, 4), dtype=float)
-    for idx, base in enumerate(seq_str):
-        if base in lut:
-            logo_matrix[idx, lut[base]] = 1.0
-    return logo_matrix, np.ones(map_size, dtype=float)
-
-
 def compute_per_position_block_score(
     dep_map: np.ndarray,
     block_size: int = 6,
     quantile: float = 0.25,
 ) -> np.ndarray:
-    """Computes per-position block scores across map_size by averaging overlapping spans.
+    """Computes per-position block scores across map_size by assigning each block to its center nucleotide.
 
     Args:
         dep_map: 2D dependency map matrix of shape (L, L).
@@ -276,24 +249,19 @@ def compute_per_position_block_score(
         quantile: Quantile of off-diagonal elements in each block (default: 0.25).
 
     Returns:
-        1D array of shape (L,) containing per-nucleotide block scores.
+        1D array of shape (L,) containing per-nucleotide block scores assigned to block centers.
     """
     map_size = dep_map.shape[0]
     off_diag_mask = ~np.eye(block_size, dtype=bool)
     n_spans = map_size - block_size + 1
-    span_scores = np.zeros(n_spans, dtype=float)
+    per_pos = np.zeros(map_size, dtype=float)
+    center_offset = block_size // 2
 
     for i in range(n_spans):
         block = dep_map[i : i + block_size, i : i + block_size]
-        span_scores[i] = float(np.quantile(block[off_diag_mask], quantile))
+        per_pos[i + center_offset] = float(np.quantile(block[off_diag_mask], quantile))
 
-    per_pos = np.zeros(map_size, dtype=float)
-    counts = np.zeros(map_size, dtype=float)
-    for i in range(n_spans):
-        per_pos[i : i + block_size] += span_scores[i]
-        counts[i : i + block_size] += 1.0
-
-    return per_pos / counts
+    return per_pos
 
 
 def move_rinalmo_adapter(seq_model: Any, target_device: torch.device) -> None:
@@ -319,19 +287,15 @@ def render_and_save_dependency_map_plot(
     block_ylabel: str = "Block Score",
     scale: int = 3,
 ) -> None:
-    """Renders dependency map in the plot_annotated_dependency_map style and saves as PNG.
+    """Render dependency map plot with block scores, landmarks, and seqlet box, and save PNG.
 
     Includes:
-      - Top 1D line plot of per-position Block Score
+      - Top 1D line/bar plot of per-position Block Score
       - Axis nucleotide characters
       - Bottom genomic overview slider / track
       - Overlapping landmark annotations on the diagonal
-      - Highlighted bounding box around the centered 50-bp seqlet
+      - Highlighted bounding box around the centered seqlet
     """
-    import matplotlib.pyplot as plt
-    import matplotlib.gridspec as gridspec
-    from matplotlib.patches import Rectangle, Patch
-
     map_size = map_end - map_start
     seq_window = record_sequence[map_start:map_end]
     fasta_length = len(record_sequence)
@@ -361,11 +325,19 @@ def render_and_save_dependency_map_plot(
     ax_track = fig.add_subplot(gs[2])
 
     # -------------------------------------------------------------------------
-    # Panel 1: Top 1D Line Plot of Per-Position Block Score
+    # Panel 1: Top 1D Discrete Bar Plot of Per-Position Block Score
     # -------------------------------------------------------------------------
     x_positions = np.arange(map_size)
-    ax_block.plot(x_positions, block_scores, color="#1E3A8A", linewidth=2.0)
-    ax_block.fill_between(x_positions, block_scores, color="#3B82F6", alpha=0.25)
+    ax_block.bar(
+        x_positions,
+        block_scores,
+        width=0.82,
+        color="#3B82F6",
+        edgecolor="#1E3A8A",
+        linewidth=0.6,
+        alpha=0.85,
+        zorder=3,
+    )
 
     s_rel_start = max(0, seqlet_info["seqlet_genomic_start"] - map_start)
     s_rel_end = min(map_size, seqlet_info["seqlet_genomic_end"] - map_start)
@@ -446,7 +418,7 @@ def render_and_save_dependency_map_plot(
                     Patch(edgecolor=c_tuple, facecolor="none", linestyle=":", linewidth=1.5, label=f"Landmark: {ftype}")
                 )
 
-    # Highlight Centered 50-bp Seqlet Bounding Box
+    # Highlight Centered Seqlet Bounding Box
     s_len = s_rel_end - s_rel_start
 
     seqlet_rect = Rectangle(
@@ -468,7 +440,7 @@ def render_and_save_dependency_map_plot(
             edgecolor="#b2182b",
             facecolor="none",
             linewidth=2.5,
-            label=f"{pattern_display} Seqlet (50 bp, {strand_label})",
+            label=f"{pattern_display} Seqlet ({s_len} bp, {strand_label})",
         ),
     )
 
@@ -509,7 +481,7 @@ def render_and_save_dependency_map_plot(
     clade_str = f" ({seqlet_info['order_clade']})" if ("order_clade" in seqlet_info and seqlet_info["order_clade"]) else ""
     fig.suptitle(
         f"Species: {seqlet_info['species']}{clade_str} | Region: [{map_start:,}, {map_end:,}) bp\n"
-        f"50-bp Consensus Match: {seqlet_info['exact_matches_50']}/50 bp ({seqlet_info['match_fraction_50']*100:.1f}%) | "
+        f"{s_len}-bp Consensus Match: {seqlet_info['exact_matches_50']}/{s_len} bp ({seqlet_info['match_fraction_50']*100:.1f}%) | "
         f"Mean Attr: {seqlet_info['attr_mean_50']:.1f} | PWM Score: {seqlet_info['pwm_score_50']:.1f}",
         fontsize=11.0,
         fontweight="bold",
@@ -526,43 +498,43 @@ def render_and_save_dependency_map_plot(
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parses command-line arguments exposing all hyperparameters."""
     parser = argparse.ArgumentParser(
-        description="Compute and plot 200x200 RiNALMo (+LoRA) dependency maps for exemplar TF-MoDISco seqlets."
+        description="Compute and plot RiNALMo (+LoRA) dependency maps for exemplar TF-MoDISco seqlets."
     )
     parser.add_argument(
         "--modisco-h5",
         type=Path,
-        default=Path("outputs/tfmodisco_runs/all_seq_n/results.h5"),
-        help="Path to TF-MoDISco results.h5 (default: outputs/tfmodisco_runs/all_seq_n/results.h5).",
+        default=DEFAULT_RUN_DIR / "results.h5",
+        help=f"Path to TF-MoDISco results.h5 (default: {DEFAULT_RUN_DIR / 'results.h5'}).",
     )
     parser.add_argument(
         "--metadata",
         type=Path,
-        default=Path("outputs/tfmodisco_inputs/all_seq/candidate_metadata.parquet"),
-        help="Path to candidate_metadata.parquet (default: outputs/tfmodisco_inputs/all_seq/candidate_metadata.parquet).",
+        default=DEFAULT_INPUT_DIR / "candidate_metadata.parquet",
+        help=f"Path to candidate_metadata.parquet (default: {DEFAULT_INPUT_DIR / 'candidate_metadata.parquet'}).",
     )
     parser.add_argument(
         "--attributions-npz",
         type=Path,
-        default=Path("outputs/tfmodisco_inputs/all_seq/attributions.npz"),
-        help="Path to attributions.npz (default: outputs/tfmodisco_inputs/all_seq/attributions.npz).",
+        default=DEFAULT_INPUT_DIR / "attributions.npz",
+        help=f"Path to attributions.npz (default: {DEFAULT_INPUT_DIR / 'attributions.npz'}).",
     )
     parser.add_argument(
         "--onehot-npz",
         type=Path,
-        default=Path("outputs/tfmodisco_inputs/all_seq/one_hot.npz"),
-        help="Path to one_hot.npz (default: outputs/tfmodisco_inputs/all_seq/one_hot.npz).",
+        default=DEFAULT_INPUT_DIR / "one_hot.npz",
+        help=f"Path to one_hot.npz (default: {DEFAULT_INPUT_DIR / 'one_hot.npz'}).",
     )
     parser.add_argument(
         "--records",
         type=Path,
-        default=Path("data/prepared/ribosome/records.parquet"),
-        help="Path to records.parquet containing rDNA sequences (default: data/prepared/ribosome/records.parquet).",
+        default=DEFAULT_RECORDS_PARQUET,
+        help=f"Path to records.parquet containing rDNA sequences (default: {DEFAULT_RECORDS_PARQUET}).",
     )
     parser.add_argument(
         "--regions",
         type=Path,
-        default=Path("data/prepared/ribosome/regions.parquet"),
-        help="Path to regions.parquet containing landmark annotations (default: data/prepared/ribosome/regions.parquet).",
+        default=DEFAULT_REGIONS_PARQUET,
+        help=f"Path to regions.parquet containing landmark annotations (default: {DEFAULT_REGIONS_PARQUET}).",
     )
     parser.add_argument(
         "--weights",
@@ -585,26 +557,26 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda:0" if torch.cuda.is_available() else "cpu",
-        help="Inference device (default: cuda:0 if available, else cpu).",
+        default=str(get_dynamic_device()),
+        help="Inference device (default: auto-detected cuda/mps/cpu).",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/tfmodisco_runs/all_seq_n/exemplar_seqlet_dependency_maps"),
-        help="Output directory (default: outputs/tfmodisco_runs/all_seq_n/exemplar_seqlet_dependency_maps).",
+        default=DEFAULT_RUN_DIR / "dep_map_100",
+        help=f"Output directory (default: {DEFAULT_RUN_DIR / 'dep_map_100'}).",
     )
     parser.add_argument(
         "--top-k",
         type=int,
-        default=3,
-        help="Number of exemplar seqlets to plot per motif pattern (default: 3).",
+        default=1,
+        help="Number of exemplar seqlets to plot per motif pattern (default: 1).",
     )
     parser.add_argument(
         "--map-size",
         type=int,
-        default=200,
-        help="Active subset size in bp for dependency map (default: 200 -> 200x200 map).",
+        default=100,
+        help="Active subset size in bp for dependency map (default: 100 -> 100x100 map).",
     )
     parser.add_argument(
         "--context-length",
@@ -639,7 +611,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--save-npz",
         action="store_true",
-        help="Also save the raw 200x200 dependency map and reconstruction as .npz alongside the PNG.",
+        help="Also save the raw dependency map and reconstruction as .npz alongside the PNG.",
     )
     parser.add_argument(
         "--patterns",
@@ -658,6 +630,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--resume",
         action="store_true",
         help="Skip maps that have already been generated.",
+    )
+    parser.add_argument(
+        "--from-npz",
+        action="store_true",
+        help="Re-render PNG plots and recompute block scores directly from existing .npz files without loading RiNALMo models.",
     )
     return parser.parse_args(argv)
 
@@ -681,10 +658,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             raise FileNotFoundError(f"Records parquet not found: {args.records}")
         if not args.regions.is_file():
             raise FileNotFoundError(f"Regions parquet not found: {args.regions}")
-        if not args.weights.is_file():
-            raise FileNotFoundError(f"RiNALMo base weights not found: {args.weights}")
-        if not args.lora_weights.is_file():
-            raise FileNotFoundError(f"LoRA weights checkpoint not found: {args.lora_weights}")
+        if not args.from_npz:
+            if not args.weights.is_file():
+                raise FileNotFoundError(f"RiNALMo base weights not found: {args.weights}")
+            if not args.lora_weights.is_file():
+                raise FileNotFoundError(f"LoRA weights checkpoint not found: {args.lora_weights}")
 
         output_dir = args.output_dir.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -708,23 +686,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         oh_key = list(oh_npz.keys())[0]
         one_hot_arr = oh_npz[oh_key]  # shape: (N_windows, 4, 400)
 
-        # Load RiNALMo-mega Adapted (+LoRA) and Base models onto CPU initially
         target_device = torch.device(args.device)
-        logger.info("Loading Adapted RiNALMo (%s) from %s with LoRA from %s...", args.model_size, args.weights, args.lora_weights)
-        adapted_model = load_rinalmo_model(
-            model_size=args.model_size,
-            weights_path=args.weights,
-            device="cpu",
-            lora_weights_path=args.lora_weights,
-        )
-        logger.info("Loading Base RiNALMo (%s) from %s (no LoRA)...", args.model_size, args.weights)
-        base_model = load_rinalmo_model(
-            model_size=args.model_size,
-            weights_path=args.weights,
-            device="cpu",
-            lora_weights_path=None,
-        )
-        logger.info("Both Adapted and Base RiNALMo models loaded successfully (active inference device: %s).", args.device)
+        adapted_model: Any = None
+        base_model: Any = None
+        if not args.from_npz:
+            # Load RiNALMo-mega Adapted (+LoRA) and Base models onto CPU initially
+            logger.info("Loading Adapted RiNALMo (%s) from %s with LoRA from %s...", args.model_size, args.weights, args.lora_weights)
+            adapted_model = load_rinalmo_model(
+                model_size=args.model_size,
+                weights_path=args.weights,
+                device="cpu",
+                lora_weights_path=args.lora_weights,
+            )
+            logger.info("Loading Base RiNALMo (%s) from %s (no LoRA)...", args.model_size, args.weights)
+            base_model = load_rinalmo_model(
+                model_size=args.model_size,
+                weights_path=args.weights,
+                device="cpu",
+                lora_weights_path=None,
+            )
+            logger.info("Both Adapted and Base RiNALMo models loaded successfully (active inference device: %s).", args.device)
+        else:
+            logger.info("Running in --from-npz mode: skipping RiNALMo model loading.")
 
         # Select patterns to process
         pattern_groups = ["pos_patterns", "neg_patterns"]
@@ -755,7 +738,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             for full_p in all_pattern_names:
                 grp_name, pat_name = full_p.split(".")
                 p_grp = f[grp_name][pat_name]
-                ppm_50 = np.array(p_grp["sequence"][:], dtype=np.float64)
+                ppm = np.array(p_grp["sequence"][:], dtype=np.float64)
 
                 s_grp = p_grp["seqlets"]
                 ex_idxs = np.array(s_grp["example_idx"][:], dtype=np.int64)
@@ -765,7 +748,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
                 selected = select_top_exemplar_seqlets(
                     pattern_name=full_p,
-                    ppm_50=ppm_50,
+                    ppm=ppm,
                     example_idxs=ex_idxs,
                     seqlet_starts=s_starts,
                     seqlet_ends=s_ends,
@@ -785,11 +768,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.info("Saved selected exemplar seqlets metadata table to: %s", summary_tsv)
 
         # Compute dependency maps and render both Adapted and Delta plots
-        def tokenize_func(sequence: str, mask: Optional[int]) -> object:
-            return adapted_model.dependency_tokenize(sequence, mask)
+        tokenize_func: Any = None
+        forward_adapted: Any = None
+        forward_base: Any = None
+        if not args.from_npz:
+            def _tokenize_func(sequence: str, mask: Optional[int]) -> object:
+                return adapted_model.dependency_tokenize(sequence, mask)
 
-        forward_adapted = partial(adapted_model.dependency_forward, batch_size=args.batch_size)
-        forward_base = partial(base_model.dependency_forward, batch_size=args.batch_size)
+            tokenize_func = _tokenize_func
+            forward_adapted = partial(adapted_model.dependency_forward, batch_size=args.batch_size)
+            forward_base = partial(base_model.dependency_forward, batch_size=args.batch_size)
         cpu_device = torch.device("cpu")
 
         for seqlet in all_selected_seqlets:
@@ -803,7 +791,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             rec_seq = str(records_df.loc[rec_id, "sequence"]).upper()
             seq_len = len(rec_seq)
 
-            # Center a 200-bp map window around the 50-bp seqlet midpoint
+            # Center a map window around the seqlet midpoint
             seqlet_mid = (s_start + s_end) // 2
             half_map = args.map_size // 2
             map_start = max(0, min(seq_len - args.map_size, seqlet_mid - half_map))
@@ -827,62 +815,83 @@ def main(argv: Optional[List[str]] = None) -> int:
             stem = f"{pat_display}_rank{rank}_{safe_rec}_{map_start}_{map_end}"
             out_png_adapted = pat_out_dir / f"{stem}_adapted.png"
             out_png_delta = pat_out_dir / f"{stem}_delta.png"
+            out_npz = pat_out_dir / f"{stem}.npz"
 
             if args.resume and out_png_adapted.is_file() and out_png_delta.is_file():
                 logger.info("Skipping existing adapted + delta maps for %s rank %d: %s", pat_display, rank, stem)
                 continue
 
-            logger.info(
-                "Computing Adapted & Base dependency maps for %s (rank %d): record=%s, map=[%d, %d), context=[%d, %d) (len=%d)...",
-                pat_display,
-                rank,
-                rec_id,
-                map_start,
-                map_end,
-                win_start,
-                win_end,
-                len(context_seq),
-            )
+            if args.from_npz:
+                if not out_npz.is_file():
+                    raise FileNotFoundError(f"--from-npz requested, but NPZ file does not exist: {out_npz}")
+                logger.info("Loading precomputed dependency maps from NPZ: %s", out_npz)
+                loaded_npz = np.load(out_npz)
+                raw_dep_adapted = np.array(loaded_npz["dependency_map_adapted"], dtype=np.float64)
+                raw_dep_base = np.array(loaded_npz["dependency_map_base"], dtype=np.float64)
+                recon_adapted = np.array(loaded_npz["reconstruction_adapted"])
+                recon_base = np.array(loaded_npz["reconstruction_base"])
+                dep_adapted = raw_dep_adapted.copy()
+                dep_base = raw_dep_base.copy()
+                np.fill_diagonal(dep_adapted, 0.0)
+                np.fill_diagonal(dep_base, 0.0)
+                dep_delta = dep_adapted - dep_base
+            else:
+                logger.info(
+                    "Computing Adapted & Base dependency maps for %s (rank %d): record=%s, map=[%d, %d), context=[%d, %d) (len=%d)...",
+                    pat_display,
+                    rank,
+                    rec_id,
+                    map_start,
+                    map_end,
+                    win_start,
+                    win_end,
+                    len(context_seq),
+                )
 
-            job_options = DependencyMapOptions(
-                subset=active_subset,
-                with_reconstruction=True,
-                dependency_by_masking=False,
-                autoregressive=False,
-            )
+                job_options = DependencyMapOptions(
+                    subset=active_subset,
+                    with_reconstruction=True,
+                    dependency_by_masking=False,
+                    autoregressive=False,
+                )
 
-            # 1. Adapted RiNALMo pass
-            move_rinalmo_adapter(adapted_model, target_device)
-            dm_adapted = DependencyMap.compute_batched(
-                context_seq,
-                tokenize_func,
-                forward_adapted,
-                batch_size=args.batch_size,
-                enable_progress_bar=False,
-                options=job_options,
-            )
-            move_rinalmo_adapter(adapted_model, cpu_device)
-            if target_device.type == "cuda":
-                torch.cuda.empty_cache()
+                # 1. Adapted RiNALMo pass
+                move_rinalmo_adapter(adapted_model, target_device)
+                dm_adapted = DependencyMap.compute_batched(
+                    context_seq,
+                    tokenize_func,
+                    forward_adapted,
+                    batch_size=args.batch_size,
+                    enable_progress_bar=False,
+                    options=job_options,
+                )
+                move_rinalmo_adapter(adapted_model, cpu_device)
+                if target_device.type == "cuda":
+                    torch.cuda.empty_cache()
 
-            # 2. Base RiNALMo pass
-            move_rinalmo_adapter(base_model, target_device)
-            dm_base = DependencyMap.compute_batched(
-                context_seq,
-                tokenize_func,
-                forward_base,
-                batch_size=args.batch_size,
-                enable_progress_bar=False,
-                options=job_options,
-            )
-            move_rinalmo_adapter(base_model, cpu_device)
-            if target_device.type == "cuda":
-                torch.cuda.empty_cache()
+                # 2. Base RiNALMo pass
+                move_rinalmo_adapter(base_model, target_device)
+                dm_base = DependencyMap.compute_batched(
+                    context_seq,
+                    tokenize_func,
+                    forward_base,
+                    batch_size=args.batch_size,
+                    enable_progress_bar=False,
+                    options=job_options,
+                )
+                move_rinalmo_adapter(base_model, cpu_device)
+                if target_device.type == "cuda":
+                    torch.cuda.empty_cache()
 
-            # Extract zero-diagonal matrices
-            dep_adapted = dm_adapted.get_depenency_map_without_diagonal()
-            dep_base = dm_base.get_depenency_map_without_diagonal()
-            dep_delta = dep_adapted - dep_base
+                raw_dep_adapted = dm_adapted.dependency_map
+                raw_dep_base = dm_base.dependency_map
+                recon_adapted = dm_adapted.reconstruction
+                recon_base = dm_base.reconstruction
+
+                # Extract zero-diagonal matrices
+                dep_adapted = dm_adapted.get_depenency_map_without_diagonal()
+                dep_base = dm_base.get_depenency_map_without_diagonal()
+                dep_delta = dep_adapted - dep_base
 
             # Compute per-position Block Scores
             bs_adapted = compute_per_position_block_score(
@@ -926,14 +935,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
 
             if args.save_npz:
-                out_npz = pat_out_dir / f"{stem}.npz"
                 np.savez_compressed(
                     out_npz,
-                    dependency_map_adapted=dm_adapted.dependency_map,
-                    dependency_map_base=dm_base.dependency_map,
+                    dependency_map_adapted=raw_dep_adapted,
+                    dependency_map_base=raw_dep_base,
                     dependency_map_delta=dep_delta,
-                    reconstruction_adapted=dm_adapted.reconstruction,
-                    reconstruction_base=dm_base.reconstruction,
+                    reconstruction_adapted=recon_adapted,
+                    reconstruction_base=recon_base,
                     block_score_adapted=bs_adapted,
                     block_score_base=bs_base,
                     block_score_delta=bs_delta,
